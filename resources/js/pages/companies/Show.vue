@@ -13,7 +13,7 @@ import {
     Clock,
     XCircle,
     Globe,
-    Search,
+    Radar,
     Loader2,
     RefreshCw,
     Package,
@@ -94,6 +94,7 @@ interface DiscoveredPolicy {
 }
 
 interface LatestDiscovery {
+    id: number;
     status: string;
     policies_found: number;
     urls_crawled: number;
@@ -420,6 +421,11 @@ function toggleDocumentLink(documentId: number) {
     } else {
         linkDocumentsForm.document_ids.splice(index, 1);
     }
+}
+
+function navigateToPolicyDetail(website: Website, policyIndex: number) {
+    if (!website.latest_discovery?.id) return;
+    router.visit(`/queue/discovery/${website.latest_discovery.id}/policy/${policyIndex}`);
 }
 </script>
 
@@ -880,7 +886,7 @@ function toggleDocumentLink(documentId: number) {
                                             @click.stop="discoverPolicies(website)"
                                             :disabled="website.discovery_status === 'running'"
                                         >
-                                            <Search
+                                            <Radar
                                                 v-if="website.discovery_status !== 'running'"
                                                 class="mr-2 h-4 w-4"
                                             />
@@ -888,7 +894,7 @@ function toggleDocumentLink(documentId: number) {
                                                 v-else
                                                 class="mr-2 h-4 w-4 animate-spin"
                                             />
-                                            Discover
+                                            Find Policies
                                         </Button>
                                         <Button
                                             variant="outline"
@@ -913,36 +919,61 @@ function toggleDocumentLink(documentId: number) {
                                 <CardContent class="pt-0">
                                     <!-- Discovery Results -->
                                     <div
-                                        v-if="website.latest_discovery && website.latest_discovery.discovered_urls.length > 0"
-                                        class="mb-4 rounded-lg border bg-muted/50 p-3"
+                                        v-if="website.latest_discovery?.discovered_urls?.length > 0"
+                                        class="mb-4 rounded-lg border bg-muted/30 p-4"
                                     >
-                                        <div class="mb-2 flex items-center justify-between">
+                                        <div class="mb-3 flex items-center justify-between">
                                             <span class="text-sm font-medium">
                                                 Discovered Policies ({{ website.latest_discovery.policies_found }})
                                             </span>
                                             <span class="text-xs text-muted-foreground">
-                                                {{ website.latest_discovery.urls_crawled }} URLs crawled
+                                                {{ website.latest_discovery.urls_crawled }} pages crawled
                                             </span>
                                         </div>
-                                        <div class="space-y-1">
-                                            <div
-                                                v-for="policy in website.latest_discovery.discovered_urls.slice(0, 5)"
+                                        <div class="space-y-2">
+                                            <button
+                                                v-for="(policy, policyIndex) in (website.latest_discovery?.discovered_urls ?? [])"
                                                 :key="policy.url"
-                                                class="flex items-center justify-between text-sm"
+                                                type="button"
+                                                class="w-full text-left flex items-start justify-between gap-3 rounded-lg border bg-background p-4 hover:bg-muted/50 transition-colors cursor-pointer"
+                                                @click="navigateToPolicyDetail(website, policyIndex)"
                                             >
-                                                <a
-                                                    :href="policy.url"
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    class="flex items-center gap-1 text-muted-foreground hover:text-foreground truncate max-w-md"
-                                                >
-                                                    <ExternalLink class="h-3 w-3 flex-shrink-0" />
-                                                    {{ policy.url }}
-                                                </a>
-                                                <Badge variant="outline" class="text-xs">
-                                                    {{ policy.detected_type || 'unknown' }}
-                                                </Badge>
-                                            </div>
+                                                <div class="min-w-0 flex-1">
+                                                    <div class="flex items-center gap-2 mb-1">
+                                                        <Badge variant="outline" class="text-xs capitalize">
+                                                            {{ (policy.detected_type || 'unknown').replace('-', ' ') }}
+                                                        </Badge>
+                                                        <span class="text-xs text-muted-foreground capitalize">
+                                                            via {{ policy.discovery_method.replace('_', ' ') }}
+                                                        </span>
+                                                        <Badge
+                                                            v-if="policy.confidence >= 0.9"
+                                                            variant="secondary"
+                                                            class="text-xs"
+                                                        >
+                                                            High confidence
+                                                        </Badge>
+                                                    </div>
+                                                    <p class="text-sm text-blue-600 break-all">
+                                                        {{ policy.url }}
+                                                    </p>
+                                                    <p v-if="policy.link_text" class="mt-1 text-xs text-muted-foreground">
+                                                        Link text: "{{ policy.link_text }}"
+                                                    </p>
+                                                </div>
+                                                <div class="flex-shrink-0 flex items-center gap-1">
+                                                    <a
+                                                        :href="policy.url"
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        @click.stop
+                                                    >
+                                                        <Button variant="ghost" size="sm" title="Open in new tab">
+                                                            <ExternalLink class="h-4 w-4" />
+                                                        </Button>
+                                                    </a>
+                                                </div>
+                                            </button>
                                         </div>
                                     </div>
 
@@ -954,9 +985,12 @@ function toggleDocumentLink(documentId: number) {
                                         <div
                                             v-for="doc in website.documents"
                                             :key="doc.id"
-                                            class="flex items-start justify-between rounded-lg border p-3"
+                                            class="flex items-start justify-between rounded-lg border p-3 hover:bg-muted/30 transition-colors"
                                         >
-                                            <div class="flex items-start gap-3">
+                                            <Link
+                                                :href="`/documents/${doc.id}`"
+                                                class="flex items-start gap-3 flex-1 min-w-0"
+                                            >
                                                 <div class="mt-0.5">
                                                     <component
                                                         :is="getScrapeStatusIcon(doc.scrape_status)"
@@ -964,7 +998,7 @@ function toggleDocumentLink(documentId: number) {
                                                         :class="getScrapeStatusColor(doc.scrape_status)"
                                                     />
                                                 </div>
-                                                <div>
+                                                <div class="min-w-0">
                                                     <div class="flex items-center gap-2 flex-wrap">
                                                         <span class="font-medium">{{ doc.type }}</span>
                                                         <Badge
@@ -991,26 +1025,34 @@ function toggleDocumentLink(documentId: number) {
                                                             {{ product.name }}
                                                         </Badge>
                                                     </div>
-                                                    <a
-                                                        :href="doc.url"
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        class="mt-1 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-                                                    >
-                                                        <ExternalLink class="h-3 w-3" />
+                                                    <p class="mt-1 text-xs text-muted-foreground break-all">
                                                         {{ doc.url }}
-                                                    </a>
+                                                    </p>
                                                     <div class="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
                                                         <span>{{ doc.version_count }} version{{ doc.version_count !== 1 ? 's' : '' }}</span>
                                                         <span>Last scraped: {{ formatDate(doc.last_scraped_at) }}</span>
                                                     </div>
                                                 </div>
-                                            </div>
-                                            <div class="flex items-center gap-1">
+                                            </Link>
+                                            <div class="flex items-center gap-1 flex-shrink-0">
+                                                <a
+                                                    :href="doc.url"
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    @click.stop
+                                                >
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="sm"
+                                                        title="View original"
+                                                    >
+                                                        <ExternalLink class="h-4 w-4" />
+                                                    </Button>
+                                                </a>
                                                 <Button
                                                     variant="ghost"
                                                     size="sm"
-                                                    @click="scrapeDocument(doc)"
+                                                    @click.stop="scrapeDocument(doc)"
                                                     :disabled="doc.scrape_status === 'running'"
                                                     title="Scrape now"
                                                 >
@@ -1023,7 +1065,7 @@ function toggleDocumentLink(documentId: number) {
                                                     variant="ghost"
                                                     size="sm"
                                                     class="text-red-600 hover:text-red-700"
-                                                    @click="deleteDocument(doc)"
+                                                    @click.stop="deleteDocument(doc)"
                                                     title="Delete document"
                                                 >
                                                     <Trash2 class="h-4 w-4" />
@@ -1188,5 +1230,6 @@ function toggleDocumentLink(documentId: number) {
                 </form>
             </DialogContent>
         </Dialog>
+
     </AppLayout>
 </template>

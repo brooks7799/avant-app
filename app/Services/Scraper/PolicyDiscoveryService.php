@@ -2,6 +2,7 @@
 
 namespace App\Services\Scraper;
 
+use App\Models\DiscoveryJob;
 use App\Models\DocumentType;
 use App\Models\Website;
 use App\Services\Scraper\DTO\DiscoveredPolicy;
@@ -30,41 +31,63 @@ class PolicyDiscoveryService
     /**
      * Discover policy documents on a website.
      */
-    public function discover(Website $website): DiscoveryResult
+    public function discover(Website $website, ?DiscoveryJob $job = null): DiscoveryResult
     {
         $discoveredPolicies = [];
         $urlsCrawled = 0;
         $visitedUrls = [];
         $baseUrl = $website->base_url;
 
+        $job?->logInfo("Starting discovery for {$website->url}");
+
         try {
             // 1. Parse robots.txt
+            $job?->logInfo('Parsing robots.txt...');
             $robotsTxt = $this->parseRobotsTxt($baseUrl);
+            if ($robotsTxt) {
+                $sitemapCount = count($robotsTxt['sitemaps'] ?? []);
+                $job?->logSuccess("Found robots.txt with {$sitemapCount} sitemap(s)");
+            } else {
+                $job?->logInfo('No robots.txt found');
+            }
 
             // 2. Check sitemap for policy URLs
-            $sitemapUrls = $this->discoverFromSitemaps($baseUrl, $robotsTxt);
+            $job?->logInfo('Checking sitemaps for policy URLs...');
+            $sitemapUrls = $this->discoverFromSitemaps($baseUrl, $robotsTxt, $job);
             foreach ($sitemapUrls['policies'] ?? [] as $policy) {
-                $discoveredPolicies[$policy->url] = $policy;
+                $normalizedUrl = $this->normalizeUrl($policy->url);
+                if (!isset($discoveredPolicies[$normalizedUrl])) {
+                    $discoveredPolicies[$normalizedUrl] = $policy;
+                }
             }
 
             // 3. Check common paths
-            $commonPathResults = $this->checkCommonPaths($baseUrl, $visitedUrls);
+            $job?->logInfo('Checking common policy paths...');
+            $commonPathResults = $this->checkCommonPaths($baseUrl, $visitedUrls, $job);
             $urlsCrawled += $commonPathResults['crawled'];
             foreach ($commonPathResults['policies'] as $policy) {
-                $discoveredPolicies[$policy->url] = $policy;
+                $normalizedUrl = $this->normalizeUrl($policy->url);
+                if (!isset($discoveredPolicies[$normalizedUrl])) {
+                    $discoveredPolicies[$normalizedUrl] = $policy;
+                }
             }
 
             // 4. Crawl homepage for links
-            $crawlResults = $this->crawlForPolicyLinks($website->url, $baseUrl, $visitedUrls);
+            $job?->logInfo('Crawling homepage for policy links...');
+            $crawlResults = $this->crawlForPolicyLinks($website->url, $baseUrl, $visitedUrls, $job);
             $urlsCrawled += $crawlResults['crawled'];
             foreach ($crawlResults['policies'] as $policy) {
-                if (!isset($discoveredPolicies[$policy->url])) {
-                    $discoveredPolicies[$policy->url] = $policy;
+                $normalizedUrl = $this->normalizeUrl($policy->url);
+                if (!isset($discoveredPolicies[$normalizedUrl])) {
+                    $discoveredPolicies[$normalizedUrl] = $policy;
                 }
             }
 
             // Convert to array
             $policies = array_map(fn ($p) => $p->toArray(), array_values($discoveredPolicies));
+
+            $policyCount = count($policies);
+            $job?->logSuccess("Discovery complete: found {$policyCount} policies, crawled {$urlsCrawled} URLs");
 
             return DiscoveryResult::success(
                 discoveredPolicies: $policies,
@@ -74,8 +97,42 @@ class PolicyDiscoveryService
             );
 
         } catch (\Exception $e) {
+            $job?->logError("Discovery failed: {$e->getMessage()}");
             return DiscoveryResult::failure($e->getMessage());
         }
+    }
+
+    /**
+     * Normalize a URL for deduplication.
+     * Removes trailing slashes, query strings, fragments, and normalizes protocol.
+     */
+    protected function normalizeUrl(string $url): string
+    {
+        // Parse the URL
+        $parsed = parse_url($url);
+
+        if (!$parsed || !isset($parsed['host'])) {
+            return $url;
+        }
+
+        // Normalize scheme to https
+        $scheme = 'https';
+
+        // Normalize host (lowercase)
+        $host = strtolower($parsed['host']);
+
+        // Remove www prefix for consistency
+        $host = preg_replace('/^www\./', '', $host);
+
+        // Normalize path (remove trailing slash, lowercase)
+        $path = $parsed['path'] ?? '/';
+        $path = rtrim($path, '/');
+        if (empty($path)) {
+            $path = '/';
+        }
+
+        // Rebuild the normalized URL (without query string or fragment)
+        return "{$scheme}://{$host}{$path}";
     }
 
     /**
@@ -115,7 +172,7 @@ class PolicyDiscoveryService
     /**
      * Discover policy URLs from sitemaps.
      */
-    protected function discoverFromSitemaps(string $baseUrl, ?array $robotsTxt): array
+    protected function discoverFromSitemaps(string $baseUrl, ?array $robotsTxt, ?DiscoveryJob $job = null): array
     {
         $result = [
             'all' => [],
@@ -139,6 +196,8 @@ class PolicyDiscoveryService
                 continue;
             }
 
+            $job?->logInfo("Processing sitemap: {$sitemapUrl}");
+
             // Parse sitemap XML
             $urls = $this->parseSitemapXml($content);
             $result['all'] = array_merge($result['all'], $urls);
@@ -154,6 +213,8 @@ class PolicyDiscoveryService
                         confidence: 0.7,
                         discoveryMethod: 'sitemap',
                     );
+                    $typeLabel = $type['slug'] ?? 'unknown';
+                    $job?->logSuccess("Found policy in sitemap: {$typeLabel} at {$url}", ['url' => $url, 'type' => $typeLabel]);
                 }
             }
         }
@@ -203,7 +264,7 @@ class PolicyDiscoveryService
     /**
      * Check common paths for policy documents.
      */
-    protected function checkCommonPaths(string $baseUrl, array &$visitedUrls): array
+    protected function checkCommonPaths(string $baseUrl, array &$visitedUrls, ?DiscoveryJob $job = null): array
     {
         $result = [
             'crawled' => 0,
@@ -233,6 +294,8 @@ class PolicyDiscoveryService
                         confidence: 0.9,
                         discoveryMethod: 'common_paths',
                     );
+                    $typeLabel = $type['slug'] ?? 'unknown';
+                    $job?->logSuccess("Found policy at common path: {$typeLabel} at {$url}", ['url' => $url, 'type' => $typeLabel]);
                 }
             } catch (\Exception $e) {
                 // URL not accessible - continue
@@ -245,7 +308,7 @@ class PolicyDiscoveryService
     /**
      * Crawl a page for links to policy documents.
      */
-    protected function crawlForPolicyLinks(string $url, string $baseUrl, array &$visitedUrls): array
+    protected function crawlForPolicyLinks(string $url, string $baseUrl, array &$visitedUrls, ?DiscoveryJob $job = null): array
     {
         $result = [
             'crawled' => 0,
@@ -268,6 +331,7 @@ class PolicyDiscoveryService
 
             $html = $response->body();
             $links = $this->extractor->extractLinks($html, $baseUrl);
+            $job?->logInfo("Found " . count($links) . " links on page");
 
             foreach ($links as $link) {
                 $linkUrl = $link['url'];
@@ -294,6 +358,8 @@ class PolicyDiscoveryService
                                     discoveryMethod: 'crawl',
                                     linkText: $linkText,
                                 );
+                                $typeLabel = $type['slug'] ?? 'unknown';
+                                $job?->logSuccess("Found policy via crawl: {$typeLabel} at {$linkUrl}", ['url' => $linkUrl, 'type' => $typeLabel]);
                             }
                         } catch (\Exception $e) {
                             // Link not accessible

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Traits\HasProgressLog;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -9,6 +10,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class ScrapeJob extends Model
 {
     use HasFactory;
+    use HasProgressLog;
 
     protected $fillable = [
         'document_id',
@@ -18,6 +20,7 @@ class ScrapeJob extends Model
         'duration_ms',
         'http_status',
         'error_message',
+        'progress_log',
         'user_agent',
         'ip_address',
         'response_headers',
@@ -35,6 +38,7 @@ class ScrapeJob extends Model
             'http_status' => 'integer',
             'response_headers' => 'array',
             'content_changed' => 'boolean',
+            'progress_log' => 'array',
             'metadata' => 'array',
         ];
     }

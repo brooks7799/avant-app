@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Traits\HasProgressLog;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -9,6 +10,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class DiscoveryJob extends Model
 {
     use HasFactory;
+    use HasProgressLog;
 
     protected $fillable = [
         'website_id',
@@ -20,6 +22,7 @@ class DiscoveryJob extends Model
         'policies_found',
         'discovered_urls',
         'error_message',
+        'progress_log',
         'metadata',
     ];
 
@@ -32,6 +35,7 @@ class DiscoveryJob extends Model
             'urls_crawled' => 'integer',
             'policies_found' => 'integer',
             'discovered_urls' => 'array',
+            'progress_log' => 'array',
             'metadata' => 'array',
         ];
     }

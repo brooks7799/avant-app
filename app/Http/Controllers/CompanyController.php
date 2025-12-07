@@ -109,6 +109,7 @@ class CompanyController extends Controller
                 'discovery_status' => $website->discovery_status,
                 'last_discovered_at' => $website->last_discovered_at?->toISOString(),
                 'latest_discovery' => $latestDiscovery ? [
+                    'id' => $latestDiscovery->id,
                     'status' => $latestDiscovery->status,
                     'policies_found' => $latestDiscovery->policies_found,
                     'urls_crawled' => $latestDiscovery->urls_crawled,

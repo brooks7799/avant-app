@@ -28,9 +28,10 @@ class DiscoverPoliciesJob implements ShouldQueue
     public function handle(PolicyDiscoveryService $discoveryService): void
     {
         $this->discoveryJob->markRunning();
+        $this->discoveryJob->initializeProgressLog();
 
         try {
-            $result = $discoveryService->discover($this->website);
+            $result = $discoveryService->discover($this->website, $this->discoveryJob);
 
             if ($result->success) {
                 $this->discoveryJob->markCompleted(
@@ -48,6 +49,7 @@ class DiscoverPoliciesJob implements ShouldQueue
             }
 
         } catch (\Exception $e) {
+            $this->discoveryJob->logError("Job exception: {$e->getMessage()}");
             $this->discoveryJob->markFailed($e->getMessage());
             throw $e;
         }

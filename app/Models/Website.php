@@ -16,6 +16,7 @@ class Website extends Model
     protected $fillable = [
         'company_id',
         'url',
+        'base_url',
         'name',
         'is_primary',
         'is_active',
@@ -61,6 +62,11 @@ class Website extends Model
     public function latestDiscoveryJob(): HasOne
     {
         return $this->hasOne(DiscoveryJob::class)->latestOfMany();
+    }
+
+    public function products(): HasMany
+    {
+        return $this->hasMany(Product::class);
     }
 
     /**

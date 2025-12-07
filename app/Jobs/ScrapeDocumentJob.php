@@ -51,8 +51,15 @@ class ScrapeDocumentJob implements ShouldQueue
             }
 
             // Create version if content changed
+            $job->logInfo('Checking for content changes...');
             $version = $versioning->createVersion($this->document, $result);
             $contentChanged = $version !== null;
+
+            if ($contentChanged) {
+                $job->logSuccess('Content changed - created new version', ['version_id' => $version->id]);
+            } else {
+                $job->logInfo('No content changes detected');
+            }
 
             // Mark job as completed
             $job->markCompleted($contentChanged, $version?->id);
@@ -61,11 +68,13 @@ class ScrapeDocumentJob implements ShouldQueue
             if ($contentChanged && $version) {
                 $previousVersion = $version->previousVersion();
                 if ($previousVersion) {
+                    $job->logInfo('Queuing version comparison');
                     CompareVersionsJob::dispatch($previousVersion, $version);
                 }
             }
 
         } catch (\Exception $e) {
+            $job->logError("Job exception: {$e->getMessage()}");
             $job->markFailed($e->getMessage());
             $this->document->update([
                 'scrape_status' => 'failed',

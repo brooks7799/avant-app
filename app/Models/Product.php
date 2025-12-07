@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Str;
 
@@ -15,6 +16,7 @@ class Product extends Model
 
     protected $fillable = [
         'company_id',
+        'website_id',
         'name',
         'slug',
         'type',
@@ -50,11 +52,65 @@ class Product extends Model
                 $product->slug = Str::slug($product->name);
             }
         });
+
+        // Auto-create website when product has a URL
+        static::created(function (Product $product) {
+            $product->syncWebsite();
+        });
+
+        static::updated(function (Product $product) {
+            if ($product->isDirty('url')) {
+                $product->syncWebsite();
+            }
+        });
+    }
+
+    /**
+     * Create or update a website for this product's URL
+     */
+    public function syncWebsite(): void
+    {
+        if (empty($this->url)) {
+            return;
+        }
+
+        $parsedUrl = parse_url($this->url);
+        $baseUrl = ($parsedUrl['scheme'] ?? 'https') . '://' . ($parsedUrl['host'] ?? '');
+
+        // Check if website already exists for this base URL
+        $existingWebsite = Website::where('company_id', $this->company_id)
+            ->where('base_url', $baseUrl)
+            ->first();
+
+        if ($existingWebsite) {
+            // Link existing website to this product if not already linked
+            if (!$this->website_id || $this->website_id !== $existingWebsite->id) {
+                $this->update(['website_id' => $existingWebsite->id]);
+            }
+            return;
+        }
+
+        // Create new website
+        $website = Website::create([
+            'company_id' => $this->company_id,
+            'url' => $this->url,
+            'base_url' => $baseUrl,
+            'name' => $this->name,
+            'is_primary' => false,
+            'is_active' => true,
+        ]);
+
+        $this->update(['website_id' => $website->id]);
     }
 
     public function company(): BelongsTo
     {
         return $this->belongsTo(Company::class);
+    }
+
+    public function website(): BelongsTo
+    {
+        return $this->belongsTo(Website::class);
     }
 
     public function documents(): BelongsToMany
