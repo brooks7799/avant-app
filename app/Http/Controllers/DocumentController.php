@@ -51,6 +51,7 @@ class DocumentController extends Controller
             'currentVersion' => $document->currentVersion ? [
                 'id' => $document->currentVersion->id,
                 'version_number' => $document->currentVersion->version_number,
+                'content_raw' => $document->currentVersion->content_raw,
                 'content_text' => $document->currentVersion->content_text,
                 'content_markdown' => $document->currentVersion->content_markdown,
                 'word_count' => $document->currentVersion->word_count,

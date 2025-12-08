@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import AppLayout from '@/layouts/AppLayout.vue';
 import { type BreadcrumbItem } from '@/types';
-import { Head, Link } from '@inertiajs/vue3';
+import { Head, Link, router } from '@inertiajs/vue3';
 import {
     FileText,
     ExternalLink,
@@ -14,6 +14,11 @@ import {
     Link2,
     Hash,
     Percent,
+    Download,
+    Loader2,
+    CheckCircle2,
+    Clock,
+    History,
 } from 'lucide-vue-next';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -24,6 +29,7 @@ import {
     CardHeader,
     CardTitle,
 } from '@/components/ui/card';
+import { ref } from 'vue';
 
 interface Policy {
     url: string;
@@ -32,6 +38,24 @@ interface Policy {
     confidence: number;
     discovery_method: string;
     link_text?: string;
+}
+
+interface DocumentVersion {
+    id: number;
+    version_number: string;
+    scraped_at: string | null;
+    word_count: number;
+    is_current: boolean;
+    content_hash: string;
+}
+
+interface ExistingDocument {
+    id: number;
+    source_url: string;
+    document_type: string | null;
+    scrape_status: string;
+    last_scraped_at: string | null;
+    versions: DocumentVersion[];
 }
 
 interface Props {
@@ -52,9 +76,22 @@ interface Props {
     };
     index: number;
     totalPolicies: number;
+    document: ExistingDocument | null;
 }
 
 const props = defineProps<Props>();
+
+const isRetrieving = ref(false);
+
+function retrievePolicy() {
+    isRetrieving.value = true;
+    router.post(`/queue/discovery/${props.discoveryJob.id}/policy/${props.index}/retrieve`, {}, {
+        preserveScroll: true,
+        onFinish: () => {
+            isRetrieving.value = false;
+        },
+    });
+}
 
 const breadcrumbs: BreadcrumbItem[] = [
     { title: 'Dashboard', href: '/dashboard' },
@@ -90,7 +127,28 @@ function formatDiscoveryMethod(method: string): string {
 
 function formatDetectedType(type: string | null): string {
     if (!type) return 'Unknown';
-    return type.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    const smallWords = ['of', 'the', 'a', 'an', 'and', 'or', 'for', 'to', 'in', 'on'];
+    return type
+        .replace(/-/g, ' ')
+        .split(' ')
+        .map((word, index) => {
+            if (index > 0 && smallWords.includes(word.toLowerCase())) {
+                return word.toLowerCase();
+            }
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(' ');
+}
+
+function formatVersionDate(dateString: string | null): string {
+    if (!dateString) return 'N/A';
+    return new Date(dateString).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
 }
 </script>
 
@@ -135,11 +193,16 @@ function formatDetectedType(type: string | null): string {
                         </Button>
                     </Link>
                     <a :href="policy.url" target="_blank" rel="noopener noreferrer">
-                        <Button>
+                        <Button variant="outline">
                             <ExternalLink class="mr-2 h-4 w-4" />
                             Open URL
                         </Button>
                     </a>
+                    <Button @click="retrievePolicy" :disabled="isRetrieving">
+                        <Loader2 v-if="isRetrieving" class="mr-2 h-4 w-4 animate-spin" />
+                        <Download v-else class="mr-2 h-4 w-4" />
+                        Retrieve
+                    </Button>
                 </div>
             </div>
 
@@ -337,6 +400,87 @@ function formatDetectedType(type: string | null): string {
                     </CardContent>
                 </Card>
             </div>
+
+            <!-- Retrieved Versions -->
+            <Card v-if="document && document.versions.length > 0">
+                <CardHeader>
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <CardTitle class="flex items-center gap-2">
+                                <History class="h-5 w-5" />
+                                Retrieved Versions
+                            </CardTitle>
+                            <CardDescription>
+                                {{ document.versions.length }} version{{ document.versions.length !== 1 ? 's' : '' }} retrieved
+                            </CardDescription>
+                        </div>
+                        <Link :href="`/documents/${document.id}`">
+                            <Button variant="outline" size="sm">
+                                <FileText class="mr-2 h-4 w-4" />
+                                View Document
+                            </Button>
+                        </Link>
+                    </div>
+                </CardHeader>
+                <CardContent>
+                    <div class="space-y-2">
+                        <Link
+                            v-for="version in document.versions"
+                            :key="version.id"
+                            :href="`/queue/version/${version.id}`"
+                            class="flex items-center justify-between rounded-lg border p-3 hover:bg-muted/50 transition-colors cursor-pointer"
+                        >
+                            <div class="flex items-center gap-3">
+                                <div class="flex h-8 w-8 items-center justify-center rounded-full bg-muted">
+                                    <span class="text-sm font-medium">{{ version.version_number }}</span>
+                                </div>
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <span class="font-medium">Version {{ version.version_number }}</span>
+                                        <Badge v-if="version.is_current" variant="default" class="text-xs">
+                                            Current
+                                        </Badge>
+                                    </div>
+                                    <div class="text-xs text-muted-foreground">
+                                        {{ formatVersionDate(version.scraped_at) }}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-4 text-sm text-muted-foreground">
+                                <span>{{ version.word_count.toLocaleString() }} words</span>
+                                <span class="font-mono text-xs">{{ version.content_hash }}...</span>
+                                <ArrowRight class="h-4 w-4" />
+                            </div>
+                        </Link>
+                    </div>
+                </CardContent>
+            </Card>
+
+            <!-- Document Status (if document exists but no versions yet) -->
+            <Card v-else-if="document">
+                <CardHeader>
+                    <CardTitle class="flex items-center gap-2">
+                        <Clock class="h-5 w-5 text-yellow-500" />
+                        Document Pending
+                    </CardTitle>
+                    <CardDescription>
+                        Document created, waiting for retrieval to complete
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <div class="flex items-center justify-between">
+                        <div class="text-sm text-muted-foreground">
+                            Status: <Badge variant="outline">{{ document.scrape_status }}</Badge>
+                        </div>
+                        <Link :href="`/documents/${document.id}`">
+                            <Button variant="outline" size="sm">
+                                <FileText class="mr-2 h-4 w-4" />
+                                View Document
+                            </Button>
+                        </Link>
+                    </div>
+                </CardContent>
+            </Card>
 
             <!-- Navigation -->
             <Card>

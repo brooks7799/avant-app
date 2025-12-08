@@ -21,6 +21,7 @@ Route::get('dashboard', function () {
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::resource('companies', CompanyController::class);
+    Route::get('companies/{company}/policy/{index}', [CompanyController::class, 'showPolicy'])->name('companies.policy.show');
 
     // Website routes
     Route::post('companies/{company}/websites', [WebsiteController::class, 'store'])->name('companies.websites.store');
@@ -64,8 +65,12 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('queue/discovery/{discoveryJob}', [QueueController::class, 'showDiscoveryJob'])->name('queue.discovery.show');
     Route::get('queue/discovery/{discoveryJob}/status', [QueueController::class, 'discoveryJobStatus'])->name('queue.discovery.status');
     Route::get('queue/discovery/{discoveryJob}/policy/{index}', [QueueController::class, 'showDiscoveredPolicy'])->name('queue.discovery.policy');
+    Route::post('queue/discovery/{discoveryJob}/policy/{index}/retrieve', [QueueController::class, 'retrieveDiscoveredPolicy'])->name('queue.discovery.policy.retrieve');
+    Route::post('queue/discovery/{discoveryJob}/retrieve-all', [QueueController::class, 'retrieveAllDiscoveredPolicies'])->name('queue.discovery.retrieve-all');
     Route::get('queue/scrape/{scrapeJob}', [QueueController::class, 'showScrapeJob'])->name('queue.scrape.show');
     Route::get('queue/scrape/{scrapeJob}/status', [QueueController::class, 'scrapeJobStatus'])->name('queue.scrape.status');
+    Route::post('queue/scrape/{scrapeJob}/retry', [QueueController::class, 'retryScrapeJob'])->name('queue.scrape.retry');
+    Route::get('queue/version/{version}', [QueueController::class, 'showDocumentVersion'])->name('queue.version.show');
 
     // Queue worker control routes
     Route::post('queue/worker/start', [QueueController::class, 'startWorker'])->name('queue.worker.start');

@@ -443,13 +443,13 @@ function formatRelativeTime(dateString: string): string {
 
                 <Card>
                     <CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-                        <CardTitle class="text-sm font-medium">Ready to Scrape</CardTitle>
+                        <CardTitle class="text-sm font-medium">Ready to Retrieve</CardTitle>
                         <FileText class="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
                         <div class="text-2xl font-bold">{{ stats.documents_due }}</div>
                         <p class="text-xs text-muted-foreground">
-                            documents need scraping
+                            documents need retrieval
                         </p>
                     </CardContent>
                 </Card>
@@ -549,7 +549,7 @@ function formatRelativeTime(dateString: string): string {
             <div class="flex gap-2 border-b">
                 <button
                     :class="[
-                        'px-4 py-2 text-sm font-medium transition-colors',
+                        'px-4 py-2 text-sm font-medium transition-colors cursor-pointer',
                         activeTab === 'scrape'
                             ? 'border-b-2 border-primary text-primary'
                             : 'text-muted-foreground hover:text-foreground'
@@ -557,11 +557,11 @@ function formatRelativeTime(dateString: string): string {
                     @click="activeTab = 'scrape'"
                 >
                     <FileText class="mr-2 inline h-4 w-4" />
-                    Scrape Jobs
+                    Retrieval Jobs
                 </button>
                 <button
                     :class="[
-                        'px-4 py-2 text-sm font-medium transition-colors',
+                        'px-4 py-2 text-sm font-medium transition-colors cursor-pointer',
                         activeTab === 'discovery'
                             ? 'border-b-2 border-primary text-primary'
                             : 'text-muted-foreground hover:text-foreground'
@@ -573,15 +573,15 @@ function formatRelativeTime(dateString: string): string {
                 </button>
             </div>
 
-            <!-- Recent Scrape Jobs -->
+            <!-- Recent Retrieval Jobs -->
             <Card v-if="activeTab === 'scrape'">
                 <CardHeader>
-                    <CardTitle>Recent Scrape Jobs</CardTitle>
-                    <CardDescription>Last 50 document scraping jobs</CardDescription>
+                    <CardTitle>Recent Retrieval Jobs</CardTitle>
+                    <CardDescription>Last 50 document retrieval jobs</CardDescription>
                 </CardHeader>
                 <CardContent>
                     <div v-if="recentScrapeJobs.length === 0" class="py-8 text-center text-muted-foreground">
-                        No scrape jobs yet.
+                        No retrieval jobs yet.
                     </div>
                     <div v-else class="space-y-2">
                         <Link

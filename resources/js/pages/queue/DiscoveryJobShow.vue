@@ -164,9 +164,15 @@ function formatDuration(ms: number | null): string {
 
 function formatDocumentType(type: string | null): string {
     if (!type) return 'Unknown';
+    const smallWords = ['of', 'the', 'a', 'an', 'and', 'or', 'for', 'to', 'in', 'on'];
     return type
         .split('-')
-        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .map((word, index) => {
+            if (index > 0 && smallWords.includes(word.toLowerCase())) {
+                return word.toLowerCase();
+            }
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
         .join(' ');
 }
 </script>

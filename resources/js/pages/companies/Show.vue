@@ -22,6 +22,7 @@ import {
     Monitor,
     Link2,
     Unlink,
+    Download,
 } from 'lucide-vue-next';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -64,17 +65,21 @@ interface ProductLink {
     is_primary: boolean;
 }
 
-interface Document {
-    id: number;
+interface Policy {
+    // Discovery info
+    discovery_index: number | null;
+    discovery_job_id: number | null;
     url: string;
-    title: string | null;
-    type: string;
-    type_slug: string;
-    is_active: boolean;
-    is_monitored: boolean;
-    scrape_status: string;
-    scrape_frequency: string;
+    detected_type: string | null;
+    confidence: number;
     discovery_method: string;
+    link_text: string | null;
+    // Document info (if retrieved)
+    is_retrieved: boolean;
+    document_id: number | null;
+    document_type: string | null;
+    document_type_slug: string | null;
+    scrape_status: string | null;
     last_scraped_at: string | null;
     last_changed_at: string | null;
     has_version: boolean;
@@ -84,21 +89,11 @@ interface Document {
     products: ProductLink[];
 }
 
-interface DiscoveredPolicy {
-    url: string;
-    detected_type: string | null;
-    document_type_id: number | null;
-    confidence: number;
-    discovery_method: string;
-    link_text?: string;
-}
-
 interface LatestDiscovery {
     id: number;
     status: string;
     policies_found: number;
     urls_crawled: number;
-    discovered_urls: DiscoveredPolicy[];
     completed_at: string | null;
 }
 
@@ -112,7 +107,7 @@ interface Website {
     discovery_status: string | null;
     last_discovered_at: string | null;
     latest_discovery: LatestDiscovery | null;
-    documents: Document[];
+    policies: Policy[];
 }
 
 interface ProductDocument {
@@ -395,19 +390,45 @@ function formatDate(dateString: string | null): string {
     });
 }
 
-const totalDocuments = computed(() =>
-    props.websites.reduce((sum, w) => sum + w.documents.length, 0)
+const totalPolicies = computed(() =>
+    props.websites.reduce((sum, w) => sum + w.policies.length, 0)
 );
 
-// Get all documents for linking to products
+const retrievedPolicies = computed(() =>
+    props.websites.reduce((sum, w) => sum + w.policies.filter(p => p.is_retrieved).length, 0)
+);
+
+// Build a mapping from website ID + policy URL to global index
+const policyGlobalIndices = computed(() => {
+    const indices = new Map<string, number>();
+    let globalIndex = 0;
+
+    for (const website of props.websites) {
+        for (const policy of website.policies) {
+            const key = `${website.id}:${policy.url}`;
+            indices.set(key, globalIndex);
+            globalIndex++;
+        }
+    }
+
+    return indices;
+});
+
+function getGlobalPolicyIndex(websiteId: number, policyUrl: string): number {
+    return policyGlobalIndices.value.get(`${websiteId}:${policyUrl}`) ?? 0;
+}
+
+// Get all retrieved policies for linking to products
 const allDocuments = computed(() => {
-    const docs: Document[] = [];
-    props.websites.forEach(website => {
-        website.documents.forEach(doc => {
-            docs.push(doc);
-        });
-    });
-    return docs;
+    return props.websites.flatMap(website =>
+        website.policies
+            .filter(p => p.is_retrieved && p.document_id)
+            .map(p => ({
+                id: p.document_id!,
+                type: p.document_type || 'Unknown',
+                url: p.url,
+            }))
+    );
 });
 
 function isDocumentLinked(documentId: number): boolean {
@@ -423,9 +444,73 @@ function toggleDocumentLink(documentId: number) {
     }
 }
 
-function navigateToPolicyDetail(website: Website, policyIndex: number) {
+function navigateToPolicyDetail(policyIndex: number) {
+    router.visit(`/companies/${props.company.id}/policy/${policyIndex}`);
+}
+
+const retrievingPolicies = ref<Set<string>>(new Set());
+const retrievingAllForWebsite = ref<Set<number>>(new Set());
+
+function retrievePolicy(website: Website, policy: Policy, event: Event) {
+    event.stopPropagation();
+    if (policy.discovery_job_id === null || policy.discovery_index === null) return;
+
+    const key = `${policy.discovery_job_id}-${policy.discovery_index}`;
+    retrievingPolicies.value.add(key);
+
+    router.post(`/queue/discovery/${policy.discovery_job_id}/policy/${policy.discovery_index}/retrieve`, {}, {
+        preserveScroll: true,
+        onFinish: () => {
+            retrievingPolicies.value.delete(key);
+        },
+    });
+}
+
+function scrapePolicy(policy: Policy, event: Event) {
+    event.stopPropagation();
+    if (!policy.document_id) return;
+
+    router.post(`/documents/${policy.document_id}/scrape`, {}, {
+        preserveScroll: true,
+    });
+}
+
+function retrieveAllPolicies(website: Website, event: Event) {
+    event.stopPropagation();
     if (!website.latest_discovery?.id) return;
-    router.visit(`/queue/discovery/${website.latest_discovery.id}/policy/${policyIndex}`);
+
+    retrievingAllForWebsite.value.add(website.id);
+
+    router.post(`/queue/discovery/${website.latest_discovery.id}/retrieve-all`, {}, {
+        preserveScroll: true,
+        onFinish: () => {
+            retrievingAllForWebsite.value.delete(website.id);
+        },
+    });
+}
+
+function isPolicyRetrieving(policy: Policy): boolean {
+    if (policy.discovery_job_id === null || policy.discovery_index === null) return false;
+    return retrievingPolicies.value.has(`${policy.discovery_job_id}-${policy.discovery_index}`);
+}
+
+function hasUnretrievedPolicies(website: Website): boolean {
+    return website.policies.some(p => !p.has_version);
+}
+
+function formatDocumentType(type: string | null): string {
+    if (!type) return 'Unknown';
+    const smallWords = ['of', 'the', 'a', 'an', 'and', 'or', 'for', 'to', 'in', 'on'];
+    return type
+        .replaceAll('-', ' ')
+        .split(' ')
+        .map((word, index) => {
+            if (index > 0 && smallWords.includes(word.toLowerCase())) {
+                return word.toLowerCase();
+            }
+            return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(' ');
 }
 </script>
 
@@ -755,10 +840,11 @@ function navigateToPolicyDetail(website: Website, policyIndex: number) {
             <div class="space-y-4">
                 <div class="flex items-center justify-between">
                     <h2 class="text-lg font-semibold">
-                        Websites & Documents
+                        Websites & Policies
                         <span class="ml-2 text-sm font-normal text-muted-foreground">
                             {{ websites.length }} website{{ websites.length !== 1 ? 's' : '' }},
-                            {{ totalDocuments }} document{{ totalDocuments !== 1 ? 's' : '' }}
+                            {{ totalPolicies }} polic{{ totalPolicies !== 1 ? 'ies' : 'y' }}
+                            ({{ retrievedPolicies }} retrieved)
                         </span>
                     </h2>
                     <Dialog v-model:open="showAddWebsiteDialog">
@@ -902,7 +988,7 @@ function navigateToPolicyDetail(website: Website, policyIndex: number) {
                                             @click.stop="openAddDocumentDialog(website)"
                                         >
                                             <Plus class="mr-2 h-4 w-4" />
-                                            Add Doc
+                                            Manually Add
                                         </Button>
                                         <Button
                                             variant="ghost"
@@ -917,35 +1003,82 @@ function navigateToPolicyDetail(website: Website, policyIndex: number) {
                             </CardHeader>
                             <CollapsibleContent>
                                 <CardContent class="pt-0">
-                                    <!-- Discovery Results -->
+                                    <!-- Discovery Stats -->
                                     <div
-                                        v-if="website.latest_discovery?.discovered_urls?.length > 0"
-                                        class="mb-4 rounded-lg border bg-muted/30 p-4"
+                                        v-if="website.latest_discovery"
+                                        class="mb-4 flex items-center justify-between text-sm"
                                     >
-                                        <div class="mb-3 flex items-center justify-between">
-                                            <span class="text-sm font-medium">
-                                                Discovered Policies ({{ website.latest_discovery.policies_found }})
-                                            </span>
-                                            <span class="text-xs text-muted-foreground">
-                                                {{ website.latest_discovery.urls_crawled }} pages crawled
-                                            </span>
-                                        </div>
-                                        <div class="space-y-2">
-                                            <button
-                                                v-for="(policy, policyIndex) in (website.latest_discovery?.discovered_urls ?? [])"
-                                                :key="policy.url"
-                                                type="button"
-                                                class="w-full text-left flex items-start justify-between gap-3 rounded-lg border bg-background p-4 hover:bg-muted/50 transition-colors cursor-pointer"
-                                                @click="navigateToPolicyDetail(website, policyIndex)"
-                                            >
+                                        <span class="text-muted-foreground">
+                                            {{ website.latest_discovery.urls_crawled }} pages crawled
+                                        </span>
+                                        <Button
+                                            v-if="hasUnretrievedPolicies(website)"
+                                            size="sm"
+                                            @click="retrieveAllPolicies(website, $event)"
+                                            :disabled="retrievingAllForWebsite.has(website.id)"
+                                        >
+                                            <Loader2 v-if="retrievingAllForWebsite.has(website.id)" class="mr-2 h-4 w-4 animate-spin" />
+                                            <Download v-else class="mr-2 h-4 w-4" />
+                                            Retrieve All
+                                        </Button>
+                                    </div>
+
+                                    <!-- Unified Policies List -->
+                                    <div v-if="website.policies.length === 0" class="py-4 text-center text-sm text-muted-foreground">
+                                        No policies discovered for this website yet.
+                                    </div>
+                                    <div v-else class="space-y-2">
+                                        <button
+                                            v-for="policy in website.policies"
+                                            :key="policy.url"
+                                            type="button"
+                                            class="w-full text-left flex items-start justify-between gap-3 rounded-lg border p-3 hover:bg-muted/30 transition-colors cursor-pointer"
+                                            @click="navigateToPolicyDetail(getGlobalPolicyIndex(website.id, policy.url))"
+                                        >
+                                            <div class="flex items-start gap-3 flex-1 min-w-0">
+                                                <!-- Status icon -->
+                                                <div class="mt-0.5">
+                                                    <component
+                                                        v-if="policy.is_retrieved"
+                                                        :is="getScrapeStatusIcon(policy.scrape_status || 'pending')"
+                                                        class="h-4 w-4"
+                                                        :class="getScrapeStatusColor(policy.scrape_status || 'pending')"
+                                                    />
+                                                    <Clock v-else class="h-4 w-4 text-muted-foreground" />
+                                                </div>
                                                 <div class="min-w-0 flex-1">
-                                                    <div class="flex items-center gap-2 mb-1">
-                                                        <Badge variant="outline" class="text-xs capitalize">
-                                                            {{ (policy.detected_type || 'unknown').replace('-', ' ') }}
-                                                        </Badge>
-                                                        <span class="text-xs text-muted-foreground capitalize">
-                                                            via {{ policy.discovery_method.replace('_', ' ') }}
+                                                    <div class="flex items-center gap-2 flex-wrap">
+                                                        <span class="font-medium">
+                                                            {{ policy.document_type || formatDocumentType(policy.detected_type) }}
                                                         </span>
+                                                        <Badge
+                                                            v-if="policy.has_version"
+                                                            variant="default"
+                                                            class="text-xs"
+                                                        >
+                                                            Retrieved
+                                                        </Badge>
+                                                        <Badge
+                                                            v-else-if="policy.is_retrieved && policy.scrape_status === 'pending'"
+                                                            variant="outline"
+                                                            class="text-xs text-yellow-600"
+                                                        >
+                                                            Pending
+                                                        </Badge>
+                                                        <Badge
+                                                            v-else-if="policy.is_retrieved && policy.scrape_status === 'failed'"
+                                                            variant="outline"
+                                                            class="text-xs text-red-600"
+                                                        >
+                                                            Failed
+                                                        </Badge>
+                                                        <Badge
+                                                            v-else
+                                                            variant="outline"
+                                                            class="text-xs"
+                                                        >
+                                                            Not Retrieved
+                                                        </Badge>
                                                         <Badge
                                                             v-if="policy.confidence >= 0.9"
                                                             variant="secondary"
@@ -953,71 +1086,16 @@ function navigateToPolicyDetail(website: Website, policyIndex: number) {
                                                         >
                                                             High confidence
                                                         </Badge>
-                                                    </div>
-                                                    <p class="text-sm text-blue-600 break-all">
-                                                        {{ policy.url }}
-                                                    </p>
-                                                    <p v-if="policy.link_text" class="mt-1 text-xs text-muted-foreground">
-                                                        Link text: "{{ policy.link_text }}"
-                                                    </p>
-                                                </div>
-                                                <div class="flex-shrink-0 flex items-center gap-1">
-                                                    <a
-                                                        :href="policy.url"
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        @click.stop
-                                                    >
-                                                        <Button variant="ghost" size="sm" title="Open in new tab">
-                                                            <ExternalLink class="h-4 w-4" />
-                                                        </Button>
-                                                    </a>
-                                                </div>
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    <!-- Documents -->
-                                    <div v-if="website.documents.length === 0" class="py-4 text-center text-sm text-muted-foreground">
-                                        No documents tracked for this website yet.
-                                    </div>
-                                    <div v-else class="space-y-2">
-                                        <div
-                                            v-for="doc in website.documents"
-                                            :key="doc.id"
-                                            class="flex items-start justify-between rounded-lg border p-3 hover:bg-muted/30 transition-colors"
-                                        >
-                                            <Link
-                                                :href="`/documents/${doc.id}`"
-                                                class="flex items-start gap-3 flex-1 min-w-0"
-                                            >
-                                                <div class="mt-0.5">
-                                                    <component
-                                                        :is="getScrapeStatusIcon(doc.scrape_status)"
-                                                        class="h-4 w-4"
-                                                        :class="getScrapeStatusColor(doc.scrape_status)"
-                                                    />
-                                                </div>
-                                                <div class="min-w-0">
-                                                    <div class="flex items-center gap-2 flex-wrap">
-                                                        <span class="font-medium">{{ doc.type }}</span>
                                                         <Badge
-                                                            v-if="doc.overall_rating"
-                                                            :class="getRatingColor(doc.overall_rating)"
+                                                            v-if="policy.overall_rating"
+                                                            :class="getRatingColor(policy.overall_rating)"
                                                             class="text-xs"
                                                         >
-                                                            {{ doc.overall_rating }}
-                                                        </Badge>
-                                                        <Badge
-                                                            v-if="doc.discovery_method === 'crawl'"
-                                                            variant="outline"
-                                                            class="text-xs"
-                                                        >
-                                                            Auto-discovered
+                                                            {{ policy.overall_rating }}
                                                         </Badge>
                                                         <!-- Product tags -->
                                                         <Badge
-                                                            v-for="product in doc.products"
+                                                            v-for="product in policy.products"
                                                             :key="product.id"
                                                             variant="secondary"
                                                             class="text-xs"
@@ -1026,52 +1104,59 @@ function navigateToPolicyDetail(website: Website, policyIndex: number) {
                                                         </Badge>
                                                     </div>
                                                     <p class="mt-1 text-xs text-muted-foreground break-all">
-                                                        {{ doc.url }}
+                                                        {{ policy.url }}
                                                     </p>
                                                     <div class="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
-                                                        <span>{{ doc.version_count }} version{{ doc.version_count !== 1 ? 's' : '' }}</span>
-                                                        <span>Last scraped: {{ formatDate(doc.last_scraped_at) }}</span>
+                                                        <span class="capitalize">via {{ policy.discovery_method.replace('_', ' ') }}</span>
+                                                        <span v-if="policy.is_retrieved && policy.version_count > 0">
+                                                            {{ policy.version_count }} version{{ policy.version_count !== 1 ? 's' : '' }}
+                                                        </span>
+                                                        <span v-if="policy.last_scraped_at">
+                                                            Last retrieved: {{ formatDate(policy.last_scraped_at) }}
+                                                        </span>
                                                     </div>
                                                 </div>
-                                            </Link>
+                                            </div>
                                             <div class="flex items-center gap-1 flex-shrink-0">
+                                                <!-- Retrieve button (for policies without versions from discovery) -->
+                                                <Button
+                                                    v-if="!policy.has_version && policy.discovery_index !== null"
+                                                    variant="outline"
+                                                    size="sm"
+                                                    title="Retrieve this policy"
+                                                    @click="retrievePolicy(website, policy, $event)"
+                                                    :disabled="isPolicyRetrieving(policy)"
+                                                >
+                                                    <Loader2 v-if="isPolicyRetrieving(policy)" class="mr-1 h-3 w-3 animate-spin" />
+                                                    <Download v-else class="mr-1 h-3 w-3" />
+                                                    Retrieve
+                                                </Button>
+                                                <!-- Re-retrieve button (for policies with versions) -->
+                                                <Button
+                                                    v-if="policy.has_version"
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    @click="scrapePolicy(policy, $event)"
+                                                    :disabled="policy.scrape_status === 'running'"
+                                                    title="Retrieve again"
+                                                >
+                                                    <RefreshCw
+                                                        class="h-4 w-4"
+                                                        :class="{ 'animate-spin': policy.scrape_status === 'running' }"
+                                                    />
+                                                </Button>
                                                 <a
-                                                    :href="doc.url"
+                                                    :href="policy.url"
                                                     target="_blank"
                                                     rel="noopener noreferrer"
                                                     @click.stop
                                                 >
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        title="View original"
-                                                    >
+                                                    <Button variant="ghost" size="sm" title="Open in new tab">
                                                         <ExternalLink class="h-4 w-4" />
                                                     </Button>
                                                 </a>
-                                                <Button
-                                                    variant="ghost"
-                                                    size="sm"
-                                                    @click.stop="scrapeDocument(doc)"
-                                                    :disabled="doc.scrape_status === 'running'"
-                                                    title="Scrape now"
-                                                >
-                                                    <RefreshCw
-                                                        class="h-4 w-4"
-                                                        :class="{ 'animate-spin': doc.scrape_status === 'running' }"
-                                                    />
-                                                </Button>
-                                                <Button
-                                                    variant="ghost"
-                                                    size="sm"
-                                                    class="text-red-600 hover:text-red-700"
-                                                    @click.stop="deleteDocument(doc)"
-                                                    title="Delete document"
-                                                >
-                                                    <Trash2 class="h-4 w-4" />
-                                                </Button>
                                             </div>
-                                        </div>
+                                        </button>
                                     </div>
                                 </CardContent>
                             </CollapsibleContent>
@@ -1135,7 +1220,7 @@ function navigateToPolicyDetail(website: Website, policyIndex: number) {
                             />
                         </div>
                         <div class="grid gap-2">
-                            <Label for="frequency">Scrape Frequency</Label>
+                            <Label for="frequency">Retrieval Frequency</Label>
                             <Select v-model="documentForm.scrape_frequency">
                                 <SelectTrigger>
                                     <SelectValue />

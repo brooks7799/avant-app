@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import AppLayout from '@/layouts/AppLayout.vue';
 import { type BreadcrumbItem } from '@/types';
-import { Head, Link } from '@inertiajs/vue3';
+import { Head, Link, router } from '@inertiajs/vue3';
 import {
     CheckCircle2,
     Clock,
@@ -13,6 +13,12 @@ import {
     ArrowLeft,
     RefreshCw,
     Hash,
+    Code,
+    Server,
+    Bug,
+    ChevronDown,
+    ChevronRight,
+    RotateCcw,
 } from 'lucide-vue-next';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -57,6 +63,13 @@ interface Job {
     completed_at: string | null;
     duration_ms: number | null;
     created_at: string;
+    user_agent: string | null;
+    request_headers: Record<string, string> | null;
+    response_headers: Record<string, string[]> | null;
+    raw_html_size: number | null;
+    raw_html_preview: string | null;
+    extracted_html_size: number | null;
+    extracted_html_preview: string | null;
     version_preview: VersionPreview | null;
 }
 
@@ -67,12 +80,15 @@ interface Props {
 const props = defineProps<Props>();
 
 const job = ref<Job>(props.job);
+const isRetrying = ref(false);
+const showDebugPanel = ref(false);
+const activeDebugTab = ref<'request' | 'response' | 'raw' | 'extracted'>('response');
 let pollInterval: number | null = null;
 
 const breadcrumbs = computed<BreadcrumbItem[]>(() => [
     { title: 'Dashboard', href: '/dashboard' },
     { title: 'Queue Manager', href: '/queue' },
-    { title: `Scrape #${job.value.id}`, href: `/queue/scrape/${job.value.id}` },
+    { title: `Retrieval #${job.value.id}`, href: `/queue/scrape/${job.value.id}` },
 ]);
 
 const isRunning = computed(() => ['pending', 'running'].includes(job.value.status));
@@ -155,9 +171,10 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
 }
 
 function formatDuration(ms: number | null): string {
-    if (!ms) return '-';
-    if (ms < 1000) return `${ms}ms`;
-    const seconds = Math.floor(ms / 1000);
+    if (ms === null || ms === undefined) return '-';
+    const absMs = Math.abs(ms);
+    if (absMs < 1000) return `${absMs}ms`;
+    const seconds = Math.floor(absMs / 1000);
     if (seconds < 60) return `${seconds}s`;
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
@@ -188,10 +205,37 @@ function getHttpStatusColor(status: number | null): string {
     if (status >= 300 && status < 400) return 'text-yellow-600';
     return 'text-red-600';
 }
+
+function retryJob() {
+    if (isRetrying.value) return;
+    isRetrying.value = true;
+    router.post(`/queue/scrape/${job.value.id}/retry`, {}, {
+        onSuccess: () => {
+            // Redirect is handled by Inertia
+        },
+        onError: () => {
+            isRetrying.value = false;
+        },
+        onFinish: () => {
+            // Don't reset isRetrying here - we're navigating away
+        },
+    });
+}
+
+function formatBytes(bytes: number | null): string {
+    if (!bytes) return '-';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatHeaderValue(value: string | string[]): string {
+    return Array.isArray(value) ? value.join(', ') : value;
+}
 </script>
 
 <template>
-    <Head :title="`Scrape Job #${job.id}`" />
+    <Head :title="`Retrieval Job #${job.id}`" />
 
     <AppLayout :breadcrumbs="breadcrumbs">
         <div class="flex h-full flex-1 flex-col gap-6 p-4">
@@ -225,7 +269,7 @@ function getHttpStatusColor(status: number | null): string {
                         />
                     </div>
                     <div>
-                        <h1 class="text-2xl font-semibold">Scrape Job #{{ job.id }}</h1>
+                        <h1 class="text-2xl font-semibold">Retrieval Job #{{ job.id }}</h1>
                         <p class="text-sm text-muted-foreground">
                             <span v-if="job.company_name">{{ job.company_name }} &middot;</span>
                             {{ job.document_type || 'Document' }}
@@ -233,6 +277,17 @@ function getHttpStatusColor(status: number | null): string {
                     </div>
                 </div>
                 <div class="flex items-center gap-2">
+                    <Button
+                        v-if="job.status === 'failed'"
+                        variant="default"
+                        @click="retryJob"
+                        :disabled="isRetrying"
+                        class="cursor-pointer"
+                    >
+                        <RotateCcw v-if="!isRetrying" class="mr-2 h-4 w-4" />
+                        <Loader2 v-else class="mr-2 h-4 w-4 animate-spin" />
+                        {{ isRetrying ? 'Retrying...' : 'Retry' }}
+                    </Button>
                     <Badge
                         v-if="job.content_changed"
                         class="bg-blue-100 text-blue-800"
@@ -296,7 +351,7 @@ function getHttpStatusColor(status: number | null): string {
                         Progress Log
                         <Loader2 v-if="isRunning" class="h-4 w-4 animate-spin text-muted-foreground" />
                     </CardTitle>
-                    <CardDescription>Real-time progress updates from the scrape job</CardDescription>
+                    <CardDescription>Real-time progress updates from the retrieval job</CardDescription>
                 </CardHeader>
                 <CardContent>
                     <ProgressLog :entries="job.progress_log" :auto-scroll="true" />
@@ -310,6 +365,155 @@ function getHttpStatusColor(status: number | null): string {
                 </CardHeader>
                 <CardContent>
                     <p class="text-red-700 dark:text-red-400">{{ job.error_message }}</p>
+                </CardContent>
+            </Card>
+
+            <!-- Debug Panel -->
+            <Card v-if="job.raw_html_size || job.response_headers">
+                <CardHeader class="cursor-pointer" @click="showDebugPanel = !showDebugPanel">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                            <Bug class="h-5 w-5 text-muted-foreground" />
+                            <CardTitle>Debug Information</CardTitle>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <div class="flex gap-3 text-sm text-muted-foreground">
+                                <span v-if="job.raw_html_size">
+                                    Raw: {{ formatBytes(job.raw_html_size) }}
+                                </span>
+                                <span v-if="job.extracted_html_size">
+                                    Extracted: {{ formatBytes(job.extracted_html_size) }}
+                                </span>
+                            </div>
+                            <ChevronDown v-if="showDebugPanel" class="h-5 w-5 text-muted-foreground" />
+                            <ChevronRight v-else class="h-5 w-5 text-muted-foreground" />
+                        </div>
+                    </div>
+                    <CardDescription>HTTP request/response details and fetched content</CardDescription>
+                </CardHeader>
+                <CardContent v-if="showDebugPanel" class="space-y-4">
+                    <!-- Tab Buttons -->
+                    <div class="flex gap-2 border-b">
+                        <button
+                            :class="[
+                                'px-4 py-2 text-sm font-medium transition-colors cursor-pointer flex items-center',
+                                activeDebugTab === 'response'
+                                    ? 'border-b-2 border-primary text-primary'
+                                    : 'text-muted-foreground hover:text-foreground'
+                            ]"
+                            @click="activeDebugTab = 'response'"
+                        >
+                            <Server class="mr-2 h-4 w-4" />
+                            Response Headers
+                        </button>
+                        <button
+                            :class="[
+                                'px-4 py-2 text-sm font-medium transition-colors cursor-pointer flex items-center',
+                                activeDebugTab === 'request'
+                                    ? 'border-b-2 border-primary text-primary'
+                                    : 'text-muted-foreground hover:text-foreground'
+                            ]"
+                            @click="activeDebugTab = 'request'"
+                        >
+                            <ExternalLink class="mr-2 h-4 w-4" />
+                            Request Headers
+                        </button>
+                        <button
+                            :class="[
+                                'px-4 py-2 text-sm font-medium transition-colors cursor-pointer flex items-center',
+                                activeDebugTab === 'raw'
+                                    ? 'border-b-2 border-primary text-primary'
+                                    : 'text-muted-foreground hover:text-foreground',
+                                !job.raw_html_preview ? 'opacity-50' : ''
+                            ]"
+                            :disabled="!job.raw_html_preview"
+                            @click="job.raw_html_preview && (activeDebugTab = 'raw')"
+                        >
+                            <Code class="mr-2 h-4 w-4" />
+                            Raw HTML
+                            <Badge v-if="job.raw_html_size" variant="outline" class="ml-2">
+                                {{ formatBytes(job.raw_html_size) }}
+                            </Badge>
+                        </button>
+                        <button
+                            :class="[
+                                'px-4 py-2 text-sm font-medium transition-colors cursor-pointer flex items-center',
+                                activeDebugTab === 'extracted'
+                                    ? 'border-b-2 border-primary text-primary'
+                                    : 'text-muted-foreground hover:text-foreground',
+                                !job.extracted_html_preview ? 'opacity-50' : ''
+                            ]"
+                            :disabled="!job.extracted_html_preview"
+                            @click="job.extracted_html_preview && (activeDebugTab = 'extracted')"
+                        >
+                            <FileText class="mr-2 h-4 w-4" />
+                            Extracted HTML
+                            <Badge v-if="job.extracted_html_size" variant="outline" class="ml-2">
+                                {{ formatBytes(job.extracted_html_size) }}
+                            </Badge>
+                        </button>
+                    </div>
+
+                    <!-- Response Headers -->
+                    <div v-if="activeDebugTab === 'response'" class="space-y-4">
+                        <div v-if="job.response_headers" class="rounded-lg border bg-muted/30 p-4 overflow-auto max-h-[400px]">
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr v-for="(value, key) in job.response_headers" :key="key" class="border-b last:border-0">
+                                        <td class="py-2 pr-4 font-mono text-muted-foreground whitespace-nowrap align-top">{{ key }}</td>
+                                        <td class="py-2 font-mono break-all">{{ formatHeaderValue(value) }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <p v-else class="text-sm text-muted-foreground">No response headers available</p>
+                    </div>
+
+                    <!-- Request Headers -->
+                    <div v-if="activeDebugTab === 'request'" class="space-y-4">
+                        <div class="rounded-lg border bg-muted/30 p-4">
+                            <div class="space-y-2 text-sm">
+                                <div class="flex">
+                                    <span class="font-mono text-muted-foreground w-32">URL:</span>
+                                    <span class="font-mono break-all">{{ job.document_url }}</span>
+                                </div>
+                                <div class="flex">
+                                    <span class="font-mono text-muted-foreground w-32">User-Agent:</span>
+                                    <span class="font-mono break-all">{{ job.user_agent || 'Not set' }}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div v-if="job.request_headers" class="rounded-lg border bg-muted/30 p-4 overflow-auto max-h-[400px]">
+                            <table class="w-full text-sm">
+                                <tbody>
+                                    <tr v-for="(value, key) in job.request_headers" :key="key" class="border-b last:border-0">
+                                        <td class="py-2 pr-4 font-mono text-muted-foreground whitespace-nowrap align-top">{{ key }}</td>
+                                        <td class="py-2 font-mono break-all">{{ value }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Raw HTML Preview -->
+                    <div v-if="activeDebugTab === 'raw'" class="space-y-2">
+                        <div class="flex items-center justify-between text-sm text-muted-foreground">
+                            <span>Showing first 2,000 characters of {{ formatBytes(job.raw_html_size) }}</span>
+                        </div>
+                        <div class="rounded-lg border bg-muted/30 p-4 overflow-auto max-h-[500px]">
+                            <pre class="text-xs font-mono whitespace-pre-wrap break-all">{{ job.raw_html_preview }}</pre>
+                        </div>
+                    </div>
+
+                    <!-- Extracted HTML Preview -->
+                    <div v-if="activeDebugTab === 'extracted'" class="space-y-2">
+                        <div class="flex items-center justify-between text-sm text-muted-foreground">
+                            <span>Showing first 2,000 characters of {{ formatBytes(job.extracted_html_size) }}</span>
+                        </div>
+                        <div class="rounded-lg border bg-muted/30 p-4 overflow-auto max-h-[500px]">
+                            <pre class="text-xs font-mono whitespace-pre-wrap break-all">{{ job.extracted_html_preview }}</pre>
+                        </div>
+                    </div>
                 </CardContent>
             </Card>
 

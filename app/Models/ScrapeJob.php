@@ -24,6 +24,9 @@ class ScrapeJob extends Model
         'user_agent',
         'ip_address',
         'response_headers',
+        'raw_html',
+        'extracted_html',
+        'request_headers',
         'content_changed',
         'created_version_id',
         'metadata',
@@ -37,6 +40,7 @@ class ScrapeJob extends Model
             'duration_ms' => 'integer',
             'http_status' => 'integer',
             'response_headers' => 'array',
+            'request_headers' => 'array',
             'content_changed' => 'boolean',
             'progress_log' => 'array',
             'metadata' => 'array',
@@ -63,10 +67,12 @@ class ScrapeJob extends Model
 
     public function markCompleted(bool $contentChanged = false, ?int $versionId = null): void
     {
+        $this->refresh(); // Ensure started_at is fresh from DB
+        $now = now();
         $this->update([
             'status' => 'completed',
-            'completed_at' => now(),
-            'duration_ms' => $this->started_at ? now()->diffInMilliseconds($this->started_at) : null,
+            'completed_at' => $now,
+            'duration_ms' => $this->started_at ? abs($this->started_at->diffInMilliseconds($now)) : null,
             'content_changed' => $contentChanged,
             'created_version_id' => $versionId,
         ]);
@@ -74,10 +80,12 @@ class ScrapeJob extends Model
 
     public function markFailed(string $error, ?int $httpStatus = null): void
     {
+        $this->refresh(); // Ensure started_at is fresh from DB
+        $now = now();
         $this->update([
             'status' => 'failed',
-            'completed_at' => now(),
-            'duration_ms' => $this->started_at ? now()->diffInMilliseconds($this->started_at) : null,
+            'completed_at' => $now,
+            'duration_ms' => $this->started_at ? abs($this->started_at->diffInMilliseconds($now)) : null,
             'error_message' => $error,
             'http_status' => $httpStatus,
         ]);

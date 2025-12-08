@@ -17,6 +17,10 @@ import {
     ArrowLeft,
     Loader2,
     Package,
+    Code,
+    Type,
+    BookOpen,
+    FileCode,
 } from 'lucide-vue-next';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -28,6 +32,7 @@ import {
     CardTitle,
 } from '@/components/ui/card';
 import { computed, ref } from 'vue';
+import { marked } from 'marked';
 
 interface DocumentData {
     id: number;
@@ -54,6 +59,7 @@ interface DocumentData {
 interface Version {
     id: number;
     version_number: number;
+    content_raw: string | null;
     content_text: string | null;
     content_markdown: string | null;
     word_count: number;
@@ -102,7 +108,43 @@ interface Props {
 const props = defineProps<Props>();
 
 const isScraping = ref(false);
-const showFullContent = ref(false);
+const activeContentTab = ref('rendered');
+
+// Prepare HTML for iframe rendering
+const iframeHtml = computed(() => {
+    if (!props.currentVersion?.content_raw) return '';
+    const baseUrl = new URL(props.document.source_url).origin;
+    return `<!DOCTYPE html>
+<html>
+<head>
+    <base href="${baseUrl}/">
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            padding: 20px;
+            max-width: 100%;
+            color: #333;
+        }
+        img { max-width: 100%; height: auto; }
+        a { color: #0066cc; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f5f5f5; }
+    </style>
+</head>
+<body>
+${props.currentVersion.content_raw}
+</body>
+</html>`;
+});
+
+// Render markdown to HTML
+const renderedMarkdown = computed(() => {
+    if (!props.currentVersion?.content_markdown) return '';
+    return marked(props.currentVersion.content_markdown) as string;
+});
 
 const breadcrumbs = computed<BreadcrumbItem[]>(() => [
     { title: 'Dashboard', href: '/dashboard' },
@@ -246,7 +288,7 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
                     <Button @click="scrapeNow" :disabled="isScraping || document.scrape_status === 'running'">
                         <Loader2 v-if="isScraping || document.scrape_status === 'running'" class="mr-2 h-4 w-4 animate-spin" />
                         <RefreshCw v-else class="mr-2 h-4 w-4" />
-                        Scrape Now
+                        Retrieve Now
                     </Button>
                 </div>
             </div>
@@ -271,7 +313,7 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
 
                 <Card>
                     <CardHeader class="pb-2">
-                        <CardTitle class="text-sm font-medium text-muted-foreground">Last Scraped</CardTitle>
+                        <CardTitle class="text-sm font-medium text-muted-foreground">Last Retrieved</CardTitle>
                     </CardHeader>
                     <CardContent>
                         <div class="text-xl font-bold">{{ formatRelativeTime(document.last_scraped_at) }}</div>
@@ -316,7 +358,7 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
                             <dd class="mt-1 capitalize">{{ document.discovery_method.replace('_', ' ') }}</dd>
                         </div>
                         <div>
-                            <dt class="text-sm font-medium text-muted-foreground">Scrape Frequency</dt>
+                            <dt class="text-sm font-medium text-muted-foreground">Retrieval Frequency</dt>
                             <dd class="mt-1 capitalize">{{ document.scrape_frequency }}</dd>
                         </div>
                         <div>
@@ -364,30 +406,103 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
             <!-- Current Version Content -->
             <Card v-if="currentVersion">
                 <CardHeader>
-                    <div class="flex items-center justify-between">
-                        <div>
-                            <CardTitle>Current Content</CardTitle>
-                            <CardDescription>
-                                Version {{ currentVersion.version_number }} &middot;
-                                Scraped {{ formatDate(currentVersion.scraped_at) }}
-                            </CardDescription>
-                        </div>
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            @click="showFullContent = !showFullContent"
-                        >
-                            <Eye class="mr-2 h-4 w-4" />
-                            {{ showFullContent ? 'Show Less' : 'Show Full' }}
-                        </Button>
-                    </div>
+                    <CardTitle>Current Content</CardTitle>
+                    <CardDescription>
+                        Version {{ currentVersion.version_number }} &middot;
+                        Retrieved {{ formatDate(currentVersion.scraped_at) }}
+                    </CardDescription>
                 </CardHeader>
                 <CardContent>
-                    <div
-                        class="rounded-lg bg-muted/30 p-4 font-mono text-sm whitespace-pre-wrap overflow-x-auto"
-                        :class="{ 'max-h-96 overflow-y-auto': !showFullContent }"
-                    >
-                        {{ currentVersion.content_text }}
+                    <div class="space-y-4">
+                        <!-- Tab Buttons -->
+                        <div class="flex flex-wrap gap-2 border-b">
+                            <button
+                                :class="[
+                                    'px-4 py-2 text-sm font-medium transition-colors cursor-pointer flex items-center',
+                                    activeContentTab === 'rendered'
+                                        ? 'border-b-2 border-primary text-primary'
+                                        : 'text-muted-foreground hover:text-foreground'
+                                ]"
+                                @click="activeContentTab = 'rendered'"
+                            >
+                                <Eye class="mr-2 h-4 w-4" />
+                                Rendered HTML
+                            </button>
+                            <button
+                                :class="[
+                                    'px-4 py-2 text-sm font-medium transition-colors cursor-pointer flex items-center',
+                                    activeContentTab === 'markdown-rendered'
+                                        ? 'border-b-2 border-primary text-primary'
+                                        : 'text-muted-foreground hover:text-foreground',
+                                    !currentVersion.content_markdown ? 'opacity-50 cursor-not-allowed' : ''
+                                ]"
+                                :disabled="!currentVersion.content_markdown"
+                                @click="currentVersion.content_markdown && (activeContentTab = 'markdown-rendered')"
+                            >
+                                <FileCode class="mr-2 h-4 w-4" />
+                                Markdown Preview
+                            </button>
+                            <button
+                                :class="[
+                                    'px-4 py-2 text-sm font-medium transition-colors cursor-pointer flex items-center',
+                                    activeContentTab === 'text'
+                                        ? 'border-b-2 border-primary text-primary'
+                                        : 'text-muted-foreground hover:text-foreground'
+                                ]"
+                                @click="activeContentTab = 'text'"
+                            >
+                                <Type class="mr-2 h-4 w-4" />
+                                Plain Text
+                            </button>
+                            <button
+                                :class="[
+                                    'px-4 py-2 text-sm font-medium transition-colors cursor-pointer flex items-center',
+                                    activeContentTab === 'markdown'
+                                        ? 'border-b-2 border-primary text-primary'
+                                        : 'text-muted-foreground hover:text-foreground',
+                                    !currentVersion.content_markdown ? 'opacity-50 cursor-not-allowed' : ''
+                                ]"
+                                :disabled="!currentVersion.content_markdown"
+                                @click="currentVersion.content_markdown && (activeContentTab = 'markdown')"
+                            >
+                                <BookOpen class="mr-2 h-4 w-4" />
+                                Markdown Source
+                            </button>
+                            <button
+                                :class="[
+                                    'px-4 py-2 text-sm font-medium transition-colors cursor-pointer flex items-center',
+                                    activeContentTab === 'html'
+                                        ? 'border-b-2 border-primary text-primary'
+                                        : 'text-muted-foreground hover:text-foreground'
+                                ]"
+                                @click="activeContentTab = 'html'"
+                            >
+                                <Code class="mr-2 h-4 w-4" />
+                                HTML Source
+                            </button>
+                        </div>
+
+                        <!-- Content -->
+                        <div v-if="activeContentTab === 'rendered'" class="rounded-lg border bg-white overflow-hidden">
+                            <iframe
+                                :srcdoc="iframeHtml"
+                                class="w-full h-[600px] border-0"
+                                sandbox="allow-same-origin"
+                                title="Rendered HTML content"
+                            ></iframe>
+                        </div>
+                        <div v-else-if="activeContentTab === 'markdown-rendered'" class="max-h-[600px] overflow-auto rounded-lg border bg-white dark:bg-slate-900 p-6">
+                            <article class="prose prose-sm dark:prose-invert max-w-none" v-html="renderedMarkdown"></article>
+                        </div>
+                        <div v-else-if="activeContentTab === 'text'" class="max-h-[600px] overflow-auto rounded-lg border bg-muted/30 p-4">
+                            <pre class="whitespace-pre-wrap font-mono text-sm">{{ currentVersion.content_text }}</pre>
+                        </div>
+                        <div v-else-if="activeContentTab === 'markdown'" class="max-h-[600px] overflow-auto rounded-lg border bg-muted/30 p-4">
+                            <pre class="whitespace-pre-wrap font-mono text-sm">{{ currentVersion.content_markdown || 'No markdown content available' }}</pre>
+                        </div>
+                        <div v-else-if="activeContentTab === 'html'" class="max-h-[600px] overflow-auto rounded-lg border bg-muted/30 p-4">
+                            <pre class="whitespace-pre-wrap font-mono text-xs">{{ currentVersion.content_raw }}</pre>
+                        </div>
                     </div>
                 </CardContent>
             </Card>
@@ -398,11 +513,11 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
                     <FileText class="h-12 w-12 text-muted-foreground" />
                     <h3 class="mt-4 text-lg font-semibold">No content yet</h3>
                     <p class="mt-2 text-center text-sm text-muted-foreground">
-                        This document hasn't been scraped yet.
+                        This document hasn't been retrieved yet.
                     </p>
                     <Button class="mt-4" @click="scrapeNow" :disabled="isScraping">
                         <RefreshCw class="mr-2 h-4 w-4" />
-                        Scrape Now
+                        Retrieve Now
                     </Button>
                 </CardContent>
             </Card>
@@ -445,11 +560,11 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
                 </CardContent>
             </Card>
 
-            <!-- Recent Scrape Jobs -->
+            <!-- Recent Retrieval Jobs -->
             <Card v-if="scrapeJobs.length > 0">
                 <CardHeader>
-                    <CardTitle>Recent Scrape Jobs</CardTitle>
-                    <CardDescription>Last 10 scrape attempts</CardDescription>
+                    <CardTitle>Recent Retrieval Jobs</CardTitle>
+                    <CardDescription>Last 10 retrieval attempts</CardDescription>
                 </CardHeader>
                 <CardContent>
                     <div class="space-y-2">

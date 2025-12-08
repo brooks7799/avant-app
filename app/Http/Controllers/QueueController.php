@@ -7,6 +7,8 @@ use App\Jobs\ProcessDueDocumentsJob;
 use App\Jobs\ScrapeDocumentJob;
 use App\Models\DiscoveryJob;
 use App\Models\Document;
+use App\Models\DocumentType;
+use App\Models\DocumentVersion;
 use App\Models\ScrapeJob;
 use App\Models\Website;
 use Illuminate\Http\JsonResponse;
@@ -69,9 +71,16 @@ class QueueController extends Controller
                 'created_at' => $job->created_at->toISOString(),
             ]);
 
+        // Count pending job records (not just queue table)
+        $pendingScrapeJobRecords = ScrapeJob::whereIn('status', ['pending', 'running'])->count();
+        $pendingDiscoveryJobRecords = DiscoveryJob::whereIn('status', ['pending', 'running'])->count();
+
         // Get statistics
         $stats = [
-            'pending_jobs' => $pendingJobs,
+            'pending_jobs' => $pendingJobs + $pendingScrapeJobRecords + $pendingDiscoveryJobRecords,
+            'pending_queue_jobs' => $pendingJobs,
+            'pending_scrape_jobs' => $pendingScrapeJobRecords,
+            'pending_discovery_jobs' => $pendingDiscoveryJobRecords,
             'failed_jobs' => $failedJobs,
             'total_documents' => Document::count(),
             'monitored_documents' => Document::where('is_monitored', true)->where('is_active', true)->count(),
@@ -210,11 +219,21 @@ class QueueController extends Controller
         $pendingCount = DB::table('jobs')->count();
         DB::table('jobs')->truncate();
 
-        // Also reset any running statuses
-        ScrapeJob::where('status', 'running')->update(['status' => 'pending']);
-        DiscoveryJob::where('status', 'running')->update(['status' => 'pending']);
+        // Delete pending scrape jobs and reset document statuses
+        $pendingScrapeJobs = ScrapeJob::whereIn('status', ['pending', 'running'])->get();
+        foreach ($pendingScrapeJobs as $job) {
+            $job->document?->update(['scrape_status' => 'pending']);
+        }
+        ScrapeJob::whereIn('status', ['pending', 'running'])->delete();
 
-        return redirect()->back()->with('success', "Cleared {$pendingCount} pending jobs.");
+        // Delete pending discovery jobs and reset website statuses
+        $pendingDiscoveryJobs = DiscoveryJob::whereIn('status', ['pending', 'running'])->get();
+        foreach ($pendingDiscoveryJobs as $job) {
+            $job->website?->update(['discovery_status' => 'pending']);
+        }
+        DiscoveryJob::whereIn('status', ['pending', 'running'])->delete();
+
+        return redirect()->back()->with('success', "Cleared {$pendingCount} queue jobs and removed pending job records.");
     }
 
     /**
@@ -372,6 +391,12 @@ class QueueController extends Controller
 
         $policy = $discoveredUrls[$index];
 
+        // Check if a document already exists for this URL
+        $existingDocument = Document::where('source_url', $policy['url'])
+            ->where('website_id', $discoveryJob->website_id)
+            ->with(['versions' => fn ($q) => $q->orderByDesc('scraped_at'), 'documentType'])
+            ->first();
+
         return Inertia::render('queue/DiscoveredPolicyShow', [
             'policy' => $policy,
             'discoveryJob' => [
@@ -390,7 +415,233 @@ class QueueController extends Controller
             ],
             'index' => $index,
             'totalPolicies' => count($discoveredUrls),
+            'document' => $existingDocument ? [
+                'id' => $existingDocument->id,
+                'source_url' => $existingDocument->source_url,
+                'document_type' => $existingDocument->documentType?->name,
+                'scrape_status' => $existingDocument->scrape_status,
+                'last_scraped_at' => $existingDocument->last_scraped_at?->toISOString(),
+                'versions' => $existingDocument->versions->map(fn ($v) => [
+                    'id' => $v->id,
+                    'version_number' => $v->version_number,
+                    'scraped_at' => $v->scraped_at?->toISOString(),
+                    'word_count' => $v->word_count,
+                    'is_current' => $v->is_current,
+                    'content_hash' => substr($v->content_hash, 0, 12),
+                ]),
+            ] : null,
         ]);
+    }
+
+    /**
+     * Retrieve (scrape) a discovered policy - creates a document and queues a scrape job
+     */
+    public function retrieveDiscoveredPolicy(DiscoveryJob $discoveryJob, int $index): RedirectResponse
+    {
+        $discoveryJob->load(['website.company']);
+
+        $discoveredUrls = $discoveryJob->discovered_urls ?? [];
+
+        if (!isset($discoveredUrls[$index])) {
+            return redirect()->back()->with('error', 'Discovered policy not found');
+        }
+
+        $policy = $discoveredUrls[$index];
+        $website = $discoveryJob->website;
+
+        // Check if document already exists
+        $existingDocument = Document::where('source_url', $policy['url'])
+            ->where('website_id', $website->id)
+            ->first();
+
+        if ($existingDocument) {
+            // Document exists, just create a new scrape job
+            $scrapeJob = ScrapeJob::create([
+                'document_id' => $existingDocument->id,
+                'status' => 'pending',
+            ]);
+
+            ScrapeDocumentJob::dispatch($existingDocument, $scrapeJob);
+
+            return redirect()->back()->with('success', 'Scrape job queued for existing document.');
+        }
+
+        // Find document type by detected_type
+        $documentType = null;
+        if ($policy['document_type_id']) {
+            $documentType = DocumentType::find($policy['document_type_id']);
+        } elseif ($policy['detected_type']) {
+            $documentType = DocumentType::where('slug', $policy['detected_type'])->first();
+        }
+
+        // Create the document
+        $document = Document::create([
+            'company_id' => $website->company_id,
+            'website_id' => $website->id,
+            'document_type_id' => $documentType?->id,
+            'source_url' => $policy['url'],
+            'discovery_method' => $policy['discovery_method'] ?? 'crawl',
+            'is_active' => true,
+            'is_monitored' => true,
+            'scrape_frequency' => 'daily',
+            'scrape_status' => 'pending',
+            'metadata' => [
+                'discovery_job_id' => $discoveryJob->id,
+                'confidence' => $policy['confidence'] ?? null,
+                'link_text' => $policy['link_text'] ?? null,
+            ],
+        ]);
+
+        // Create and dispatch scrape job
+        $scrapeJob = ScrapeJob::create([
+            'document_id' => $document->id,
+            'status' => 'pending',
+        ]);
+
+        ScrapeDocumentJob::dispatch($document, $scrapeJob);
+
+        return redirect()->back()->with('success', 'Document created and scrape job queued.');
+    }
+
+    /**
+     * Retrieve all discovered policies from a discovery job
+     */
+    public function retrieveAllDiscoveredPolicies(DiscoveryJob $discoveryJob): RedirectResponse
+    {
+        $discoveryJob->load(['website.company']);
+
+        $discoveredUrls = $discoveryJob->discovered_urls ?? [];
+
+        if (empty($discoveredUrls)) {
+            return redirect()->back()->with('error', 'No discovered policies to retrieve.');
+        }
+
+        $website = $discoveryJob->website;
+        $created = 0;
+        $queued = 0;
+
+        foreach ($discoveredUrls as $policy) {
+            // Check if document already exists
+            $existingDocument = Document::where('source_url', $policy['url'])
+                ->where('website_id', $website->id)
+                ->first();
+
+            if ($existingDocument) {
+                // Document exists, create a scrape job
+                $scrapeJob = ScrapeJob::create([
+                    'document_id' => $existingDocument->id,
+                    'status' => 'pending',
+                ]);
+
+                ScrapeDocumentJob::dispatch($existingDocument, $scrapeJob);
+                $queued++;
+                continue;
+            }
+
+            // Find document type
+            $documentType = null;
+            if ($policy['document_type_id'] ?? null) {
+                $documentType = DocumentType::find($policy['document_type_id']);
+            } elseif ($policy['detected_type'] ?? null) {
+                $documentType = DocumentType::where('slug', $policy['detected_type'])->first();
+            }
+
+            // Create the document
+            $document = Document::create([
+                'company_id' => $website->company_id,
+                'website_id' => $website->id,
+                'document_type_id' => $documentType?->id,
+                'source_url' => $policy['url'],
+                'discovery_method' => $policy['discovery_method'] ?? 'crawl',
+                'is_active' => true,
+                'is_monitored' => true,
+                'scrape_frequency' => 'daily',
+                'scrape_status' => 'pending',
+                'metadata' => [
+                    'discovery_job_id' => $discoveryJob->id,
+                    'confidence' => $policy['confidence'] ?? null,
+                    'link_text' => $policy['link_text'] ?? null,
+                ],
+            ]);
+
+            // Create and dispatch scrape job
+            $scrapeJob = ScrapeJob::create([
+                'document_id' => $document->id,
+                'status' => 'pending',
+            ]);
+
+            ScrapeDocumentJob::dispatch($document, $scrapeJob);
+            $created++;
+        }
+
+        $message = "Created {$created} new documents";
+        if ($queued > 0) {
+            $message .= ", queued {$queued} existing documents for re-scrape";
+        }
+
+        return redirect()->back()->with('success', $message . '.');
+    }
+
+    /**
+     * Show a document version's content
+     */
+    public function showDocumentVersion(DocumentVersion $version): Response
+    {
+        $version->load(['document.company', 'document.documentType', 'document.website']);
+
+        return Inertia::render('queue/DocumentVersionShow', [
+            'version' => [
+                'id' => $version->id,
+                'version_number' => $version->version_number,
+                'content_raw' => $version->content_raw,
+                'content_text' => $version->content_text,
+                'content_markdown' => $version->content_markdown,
+                'content_hash' => $version->content_hash,
+                'word_count' => $version->word_count,
+                'character_count' => $version->character_count,
+                'language' => $version->language,
+                'scraped_at' => $version->scraped_at?->toISOString(),
+                'is_current' => $version->is_current,
+                'extraction_metadata' => $version->extraction_metadata,
+                'metadata' => $version->metadata,
+            ],
+            'document' => [
+                'id' => $version->document->id,
+                'source_url' => $version->document->source_url,
+                'document_type' => $version->document->documentType?->name,
+                'company_id' => $version->document->company_id,
+                'company_name' => $version->document->company?->name,
+                'website_url' => $version->document->website?->url,
+            ],
+        ]);
+    }
+
+    /**
+     * Retry a failed scrape job
+     */
+    public function retryScrapeJob(ScrapeJob $scrapeJob): RedirectResponse
+    {
+        if ($scrapeJob->status !== 'failed') {
+            return redirect()->back()->with('error', 'Only failed jobs can be retried.');
+        }
+
+        $document = $scrapeJob->document;
+
+        if (!$document) {
+            return redirect()->back()->with('error', 'Document not found for this job.');
+        }
+
+        // Create a new scrape job
+        $newJob = ScrapeJob::create([
+            'document_id' => $document->id,
+            'status' => 'pending',
+        ]);
+
+        ScrapeDocumentJob::dispatch($document, $newJob);
+
+        return redirect()
+            ->route('queue.scrape.show', $newJob)
+            ->with('success', 'New retrieval job queued.');
     }
 
     /**
@@ -415,6 +666,14 @@ class QueueController extends Controller
             'completed_at' => $job->completed_at?->toISOString(),
             'duration_ms' => $job->duration_ms,
             'created_at' => $job->created_at->toISOString(),
+            'user_agent' => $job->user_agent,
+            // Debug info
+            'request_headers' => $job->request_headers,
+            'response_headers' => $job->response_headers,
+            'raw_html_size' => $job->raw_html ? strlen($job->raw_html) : null,
+            'raw_html_preview' => $job->raw_html ? \Str::limit($job->raw_html, 2000) : null,
+            'extracted_html_size' => $job->extracted_html ? strlen($job->extracted_html) : null,
+            'extracted_html_preview' => $job->extracted_html ? \Str::limit($job->extracted_html, 2000) : null,
             // Include version preview if available
             'version_preview' => $job->createdVersion ? [
                 'id' => $job->createdVersion->id,

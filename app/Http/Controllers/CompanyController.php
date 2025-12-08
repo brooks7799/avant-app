@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Company;
+use App\Models\Document;
 use App\Models\DocumentType;
 use App\Models\Product;
 use Illuminate\Http\RedirectResponse;
@@ -98,6 +99,80 @@ class CompanyController extends Controller
 
         $websites = $company->websites->map(function ($website) {
             $latestDiscovery = $website->discoveryJobs->first();
+            $discoveredUrls = $latestDiscovery?->discovered_urls ?? [];
+
+            // Index documents by source_url for quick lookup
+            $documentsByUrl = $website->documents->keyBy('source_url');
+
+            // Build unified policies list from discovered URLs
+            $policies = collect($discoveredUrls)->map(function ($discovered, $index) use ($documentsByUrl, $latestDiscovery) {
+                $document = $documentsByUrl->get($discovered['url']);
+                $currentVersion = $document?->currentVersion;
+                $analysis = $currentVersion?->currentAnalysis;
+
+                return [
+                    // Discovery info
+                    'discovery_index' => $index,
+                    'discovery_job_id' => $latestDiscovery?->id,
+                    'url' => $discovered['url'],
+                    'detected_type' => $discovered['detected_type'] ?? null,
+                    'confidence' => $discovered['confidence'] ?? 0,
+                    'discovery_method' => $discovered['discovery_method'] ?? 'crawl',
+                    'link_text' => $discovered['link_text'] ?? null,
+                    // Document info (if retrieved)
+                    'is_retrieved' => $document !== null,
+                    'document_id' => $document?->id,
+                    'document_type' => $document?->documentType?->name ?? null,
+                    'document_type_slug' => $document?->documentType?->slug ?? null,
+                    'scrape_status' => $document?->scrape_status,
+                    'last_scraped_at' => $document?->last_scraped_at?->toISOString(),
+                    'last_changed_at' => $document?->last_changed_at?->toISOString(),
+                    'has_version' => $currentVersion !== null,
+                    'version_count' => $document ? ($document->versions_count ?? $document->versions()->count()) : 0,
+                    'overall_score' => $analysis?->overall_score,
+                    'overall_rating' => $analysis?->overall_rating,
+                    'products' => $document?->products->map(fn ($p) => [
+                        'id' => $p->id,
+                        'name' => $p->name,
+                        'is_primary' => $p->pivot->is_primary,
+                    ]) ?? [],
+                ];
+            });
+
+            // Add any manually-added documents that weren't from discovery
+            $discoveredUrlSet = collect($discoveredUrls)->pluck('url')->toArray();
+            $manualDocuments = $website->documents->filter(fn ($doc) => !in_array($doc->source_url, $discoveredUrlSet));
+
+            foreach ($manualDocuments as $document) {
+                $currentVersion = $document->currentVersion;
+                $analysis = $currentVersion?->currentAnalysis;
+
+                $policies->push([
+                    'discovery_index' => null,
+                    'discovery_job_id' => null,
+                    'url' => $document->source_url,
+                    'detected_type' => $document->documentType?->slug,
+                    'confidence' => 1.0,
+                    'discovery_method' => $document->discovery_method ?? 'manual',
+                    'link_text' => null,
+                    'is_retrieved' => true,
+                    'document_id' => $document->id,
+                    'document_type' => $document->documentType?->name ?? 'Unknown',
+                    'document_type_slug' => $document->documentType?->slug ?? 'unknown',
+                    'scrape_status' => $document->scrape_status,
+                    'last_scraped_at' => $document->last_scraped_at?->toISOString(),
+                    'last_changed_at' => $document->last_changed_at?->toISOString(),
+                    'has_version' => $currentVersion !== null,
+                    'version_count' => $document->versions_count ?? $document->versions()->count(),
+                    'overall_score' => $analysis?->overall_score,
+                    'overall_rating' => $analysis?->overall_rating,
+                    'products' => $document->products->map(fn ($p) => [
+                        'id' => $p->id,
+                        'name' => $p->name,
+                        'is_primary' => $p->pivot->is_primary,
+                    ]),
+                ]);
+            }
 
             return [
                 'id' => $website->id,
@@ -113,37 +188,9 @@ class CompanyController extends Controller
                     'status' => $latestDiscovery->status,
                     'policies_found' => $latestDiscovery->policies_found,
                     'urls_crawled' => $latestDiscovery->urls_crawled,
-                    'discovered_urls' => $latestDiscovery->discovered_urls,
                     'completed_at' => $latestDiscovery->completed_at?->toISOString(),
                 ] : null,
-                'documents' => $website->documents->map(function ($document) {
-                    $currentVersion = $document->currentVersion;
-                    $analysis = $currentVersion?->currentAnalysis;
-
-                    return [
-                        'id' => $document->id,
-                        'url' => $document->url,
-                        'title' => $document->title,
-                        'type' => $document->documentType->name,
-                        'type_slug' => $document->documentType->slug,
-                        'is_active' => $document->is_active,
-                        'is_monitored' => $document->is_monitored,
-                        'scrape_status' => $document->scrape_status,
-                        'scrape_frequency' => $document->scrape_frequency,
-                        'discovery_method' => $document->discovery_method,
-                        'last_scraped_at' => $document->last_scraped_at?->toISOString(),
-                        'last_changed_at' => $document->last_changed_at?->toISOString(),
-                        'has_version' => $currentVersion !== null,
-                        'version_count' => $document->versions_count ?? $document->versions()->count(),
-                        'overall_score' => $analysis?->overall_score,
-                        'overall_rating' => $analysis?->overall_rating,
-                        'products' => $document->products->map(fn ($p) => [
-                            'id' => $p->id,
-                            'name' => $p->name,
-                            'is_primary' => $p->pivot->is_primary,
-                        ]),
-                    ];
-                }),
+                'policies' => $policies->values(),
             ];
         });
 
@@ -162,8 +209,8 @@ class CompanyController extends Controller
                 'is_active' => $product->is_active,
                 'documents' => $product->documents->map(fn ($doc) => [
                     'id' => $doc->id,
-                    'type' => $doc->documentType->name,
-                    'type_slug' => $doc->documentType->slug,
+                    'type' => $doc->documentType?->name ?? 'Unknown',
+                    'type_slug' => $doc->documentType?->slug ?? 'unknown',
                     'is_primary' => $doc->pivot->is_primary,
                 ]),
             ];
@@ -246,5 +293,120 @@ class CompanyController extends Controller
         return redirect()
             ->route('companies.index')
             ->with('success', 'Company deleted successfully.');
+    }
+
+    /**
+     * Show a specific policy for a company
+     */
+    public function showPolicy(Company $company, int $index): Response
+    {
+        $company->load([
+            'websites' => function ($query) {
+                $query->with([
+                    'documents' => function ($q) {
+                        $q->with([
+                            'documentType',
+                            'versions' => fn ($v) => $v->orderByDesc('scraped_at'),
+                        ]);
+                    },
+                    'discoveryJobs' => function ($q) {
+                        $q->latest()->limit(1);
+                    },
+                ])->orderBy('is_primary', 'desc');
+            },
+        ]);
+
+        // Build unified policies list across all websites
+        $allPolicies = collect();
+
+        foreach ($company->websites as $website) {
+            $latestDiscovery = $website->discoveryJobs->first();
+            $discoveredUrls = $latestDiscovery?->discovered_urls ?? [];
+            $documentsByUrl = $website->documents->keyBy('source_url');
+
+            // Add discovered policies
+            foreach ($discoveredUrls as $discoveryIndex => $discovered) {
+                $document = $documentsByUrl->get($discovered['url']);
+
+                $allPolicies->push([
+                    'website_id' => $website->id,
+                    'website_url' => $website->url,
+                    'discovery_index' => $discoveryIndex,
+                    'discovery_job_id' => $latestDiscovery?->id,
+                    'url' => $discovered['url'],
+                    'detected_type' => $discovered['detected_type'] ?? null,
+                    'document_type_id' => $discovered['document_type_id'] ?? null,
+                    'confidence' => $discovered['confidence'] ?? 0,
+                    'discovery_method' => $discovered['discovery_method'] ?? 'crawl',
+                    'link_text' => $discovered['link_text'] ?? null,
+                    'document' => $document,
+                ]);
+            }
+
+            // Add manual documents not in discovery
+            $discoveredUrlSet = collect($discoveredUrls)->pluck('url')->toArray();
+            $manualDocuments = $website->documents->filter(fn ($doc) => !in_array($doc->source_url, $discoveredUrlSet));
+
+            foreach ($manualDocuments as $document) {
+                $allPolicies->push([
+                    'website_id' => $website->id,
+                    'website_url' => $website->url,
+                    'discovery_index' => null,
+                    'discovery_job_id' => null,
+                    'url' => $document->source_url,
+                    'detected_type' => $document->documentType?->slug,
+                    'document_type_id' => $document->document_type_id,
+                    'confidence' => 1.0,
+                    'discovery_method' => $document->discovery_method ?? 'manual',
+                    'link_text' => null,
+                    'document' => $document,
+                ]);
+            }
+        }
+
+        if (!isset($allPolicies[$index])) {
+            abort(404, 'Policy not found');
+        }
+
+        $policy = $allPolicies[$index];
+        $document = $policy['document'];
+
+        return Inertia::render('companies/PolicyShow', [
+            'policy' => [
+                'url' => $policy['url'],
+                'detected_type' => $policy['detected_type'],
+                'document_type_id' => $policy['document_type_id'],
+                'confidence' => $policy['confidence'],
+                'discovery_method' => $policy['discovery_method'],
+                'link_text' => $policy['link_text'],
+            ],
+            'website' => [
+                'id' => $policy['website_id'],
+                'url' => $policy['website_url'],
+            ],
+            'company' => [
+                'id' => $company->id,
+                'name' => $company->name,
+            ],
+            'index' => $index,
+            'totalPolicies' => $allPolicies->count(),
+            'discoveryJobId' => $policy['discovery_job_id'],
+            'discoveryIndex' => $policy['discovery_index'],
+            'document' => $document ? [
+                'id' => $document->id,
+                'source_url' => $document->source_url,
+                'document_type' => $document->documentType?->name,
+                'scrape_status' => $document->scrape_status,
+                'last_scraped_at' => $document->last_scraped_at?->toISOString(),
+                'versions' => $document->versions->map(fn ($v) => [
+                    'id' => $v->id,
+                    'version_number' => $v->version_number,
+                    'scraped_at' => $v->scraped_at?->toISOString(),
+                    'word_count' => $v->word_count,
+                    'is_current' => $v->is_current,
+                    'content_hash' => substr($v->content_hash, 0, 12),
+                ]),
+            ] : null,
+        ]);
     }
 }

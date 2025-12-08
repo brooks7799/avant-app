@@ -237,4 +237,37 @@ return [
         'discovery_queue' => env('SCRAPER_DISCOVERY_QUEUE', 'discovery'),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Browser Rendering Settings
+    |--------------------------------------------------------------------------
+    |
+    | Configuration for headless browser rendering (Playwright/Lightpanda).
+    | Used for JavaScript-heavy pages that can't be scraped with HTTP alone.
+    |
+    */
+
+    'browser' => [
+        // Enable browser rendering fallback when HTTP scraping fails
+        'enabled' => env('SCRAPER_BROWSER_ENABLED', true),
+
+        // Default browser: 'chromium' or 'lightpanda'
+        'default' => env('SCRAPER_BROWSER_DEFAULT', 'chromium'),
+
+        // Auto-select best available browser (prefers Lightpanda if running)
+        'auto_select' => env('SCRAPER_BROWSER_AUTO_SELECT', true),
+
+        // Timeout for browser rendering in milliseconds
+        'timeout' => env('SCRAPER_BROWSER_TIMEOUT', 30000),
+
+        // User agent for browser rendering (null uses Chrome default)
+        'user_agent' => env('SCRAPER_BROWSER_USER_AGENT', null),
+
+        // Lightpanda CDP endpoint
+        'lightpanda_endpoint' => env('LIGHTPANDA_ENDPOINT', 'http://127.0.0.1:9222'),
+
+        // Wait strategy: 'load', 'domcontentloaded', 'networkidle'
+        'wait_until' => env('SCRAPER_BROWSER_WAIT_UNTIL', 'networkidle'),
+    ],
+
 ];
