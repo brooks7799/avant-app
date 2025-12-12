@@ -15,6 +15,7 @@ class CompareVersionsJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries = 3;
+
     public int $timeout = 60;
 
     public function __construct(
@@ -26,6 +27,11 @@ class CompareVersionsJob implements ShouldQueue
 
     public function handle(VersioningService $versioning): void
     {
-        $versioning->getOrCreateComparison($this->oldVersion, $this->newVersion);
+        $comparison = $versioning->getOrCreateComparison($this->oldVersion, $this->newVersion);
+
+        // Queue AI diff analysis if LLM is configured
+        if (config('llm.default') && config('llm.'.config('llm.default').'.api_key')) {
+            AnalyzeVersionDiffJob::dispatch($comparison);
+        }
     }
 }

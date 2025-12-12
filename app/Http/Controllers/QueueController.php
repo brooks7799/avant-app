@@ -2,15 +2,20 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\AnalyzeDocumentVersionJob;
 use App\Jobs\DiscoverPoliciesJob;
 use App\Jobs\ProcessDueDocumentsJob;
 use App\Jobs\ScrapeDocumentJob;
+use App\Models\AnalysisJob;
+use App\Models\AnalysisResult;
 use App\Models\DiscoveryJob;
 use App\Models\Document;
 use App\Models\DocumentType;
 use App\Models\DocumentVersion;
 use App\Models\ScrapeJob;
+use App\Models\VersionComparison;
 use App\Models\Website;
+use App\Services\Scraper\VersioningService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -25,6 +30,7 @@ use Inertia\Response;
 class QueueController extends Controller
 {
     private const WORKER_PID_KEY = 'queue_worker_pid';
+    private const SCHEDULER_PID_KEY = 'scheduler_pid';
 
     public function index(): Response
     {
@@ -71,16 +77,41 @@ class QueueController extends Controller
                 'created_at' => $job->created_at->toISOString(),
             ]);
 
+        // Get recent AI analysis jobs
+        $recentAnalysisJobs = AnalysisJob::with(['documentVersion.document.company', 'documentVersion.document.documentType'])
+            ->orderByDesc('created_at')
+            ->limit(50)
+            ->get()
+            ->map(fn ($job) => [
+                'id' => $job->id,
+                'document_version_id' => $job->document_version_id,
+                'document_id' => $job->documentVersion?->document_id,
+                'document_type' => $job->documentVersion?->document?->documentType?->name,
+                'company_name' => $job->documentVersion?->document?->company?->name,
+                'analysis_type' => $job->analysis_type,
+                'status' => $job->status,
+                'model_used' => $job->model_used,
+                'tokens_used' => $job->tokens_used,
+                'analysis_cost' => $job->analysis_cost ? (float) $job->analysis_cost : null,
+                'error_message' => $job->error_message,
+                'started_at' => $job->started_at?->toISOString(),
+                'completed_at' => $job->completed_at?->toISOString(),
+                'duration_ms' => $job->duration_ms,
+                'created_at' => $job->created_at->toISOString(),
+            ]);
+
         // Count pending job records (not just queue table)
         $pendingScrapeJobRecords = ScrapeJob::whereIn('status', ['pending', 'running'])->count();
         $pendingDiscoveryJobRecords = DiscoveryJob::whereIn('status', ['pending', 'running'])->count();
+        $pendingAnalysisJobRecords = AnalysisJob::whereIn('status', ['pending', 'running'])->count();
 
         // Get statistics
         $stats = [
-            'pending_jobs' => $pendingJobs + $pendingScrapeJobRecords + $pendingDiscoveryJobRecords,
+            'pending_jobs' => $pendingJobs + $pendingScrapeJobRecords + $pendingDiscoveryJobRecords + $pendingAnalysisJobRecords,
             'pending_queue_jobs' => $pendingJobs,
             'pending_scrape_jobs' => $pendingScrapeJobRecords,
             'pending_discovery_jobs' => $pendingDiscoveryJobRecords,
+            'pending_analysis_jobs' => $pendingAnalysisJobRecords,
             'failed_jobs' => $failedJobs,
             'total_documents' => Document::count(),
             'monitored_documents' => Document::where('is_monitored', true)->where('is_active', true)->count(),
@@ -108,12 +139,19 @@ class QueueController extends Controller
             'scrape_jobs_success_today' => ScrapeJob::whereDate('created_at', today())->where('status', 'completed')->count(),
             'scrape_jobs_failed_today' => ScrapeJob::whereDate('created_at', today())->where('status', 'failed')->count(),
             'changes_detected_today' => ScrapeJob::whereDate('created_at', today())->where('content_changed', true)->count(),
+            // AI Analysis Stats
+            'ai_analyses_total' => AnalysisResult::count(),
+            'ai_analyses_today' => AnalysisResult::whereDate('created_at', today())->count(),
+            'ai_pending_queue_jobs' => DB::table('jobs')->where('queue', 'ai')->count(),
+            'version_comparisons_analyzed' => VersionComparison::where('is_analyzed', true)->count(),
+            'suspicious_timing_count' => VersionComparison::where('is_suspicious_timing', true)->count(),
         ];
 
         return Inertia::render('queue/Index', [
             'stats' => $stats,
             'recentScrapeJobs' => $recentScrapeJobs,
             'recentDiscoveryJobs' => $recentDiscoveryJobs,
+            'recentAnalysisJobs' => $recentAnalysisJobs,
             'workerStatus' => $workerStatus,
         ]);
     }
@@ -701,9 +739,9 @@ class QueueController extends Controller
 
         // Start the queue worker in the background
         // Using escapeshellarg for paths with spaces
-        // Process all queues: default, scraping, and discovery
+        // Process all queues: default, scraping, discovery, and ai
         $command = sprintf(
-            'nohup php %s queue:work --queue=default,scraping,discovery --sleep=3 --tries=3 --max-time=3600 > %s 2>&1 & echo $!',
+            'nohup php %s queue:work --queue=default,scraping,discovery,ai --sleep=3 --tries=3 --max-time=3600 > %s 2>&1 & echo $!',
             escapeshellarg($artisan),
             escapeshellarg($logFile)
         );
@@ -715,10 +753,97 @@ class QueueController extends Controller
             file_put_contents($pidFile, $pid);
             Cache::put(self::WORKER_PID_KEY, (int) $pid, now()->addDay());
 
-            return redirect()->back()->with('success', 'Queue worker started successfully.');
+            // Also start the scheduler in the background (handles stuck job cleanup)
+            $this->startScheduler();
+
+            return redirect()->back()->with('success', 'Queue worker and scheduler started successfully.');
         }
 
         return redirect()->back()->with('error', 'Failed to start queue worker.');
+    }
+
+    /**
+     * Start the scheduler for background tasks (stuck job cleanup, etc.)
+     */
+    private function startScheduler(): void
+    {
+        $schedulerPidFile = $this->getSchedulerPidFilePath();
+        $schedulerLogFile = storage_path('logs/scheduler.log');
+        $artisan = base_path('artisan');
+
+        // Check if scheduler is already running
+        $existingPid = $this->getSchedulerPid();
+        if ($existingPid) {
+            $checkResult = Process::run("ps -p {$existingPid} --no-headers");
+            if ($checkResult->successful() && !empty(trim($checkResult->output()))) {
+                return; // Already running
+            }
+        }
+
+        $schedulerCommand = sprintf(
+            'nohup php %s schedule:work > %s 2>&1 & echo $!',
+            escapeshellarg($artisan),
+            escapeshellarg($schedulerLogFile)
+        );
+
+        $result = Process::run($schedulerCommand);
+        $schedulerPid = trim($result->output());
+
+        if (is_numeric($schedulerPid)) {
+            file_put_contents($schedulerPidFile, $schedulerPid);
+            Cache::put(self::SCHEDULER_PID_KEY, (int) $schedulerPid, now()->addDay());
+        }
+    }
+
+    /**
+     * Stop the scheduler
+     */
+    private function stopScheduler(): void
+    {
+        $pid = $this->getSchedulerPid();
+
+        if ($pid) {
+            Process::run("kill {$pid} 2>/dev/null");
+        }
+
+        $this->cleanupSchedulerPidFile();
+    }
+
+    /**
+     * Get the scheduler PID
+     */
+    private function getSchedulerPid(): ?int
+    {
+        $pid = Cache::get(self::SCHEDULER_PID_KEY);
+
+        if (!$pid) {
+            $pidFile = $this->getSchedulerPidFilePath();
+            if (file_exists($pidFile)) {
+                $pid = (int) trim(file_get_contents($pidFile));
+            }
+        }
+
+        return $pid ?: null;
+    }
+
+    /**
+     * Get the scheduler PID file path
+     */
+    private function getSchedulerPidFilePath(): string
+    {
+        return storage_path('scheduler.pid');
+    }
+
+    /**
+     * Clean up the scheduler PID file and cache
+     */
+    private function cleanupSchedulerPidFile(): void
+    {
+        $pidFile = $this->getSchedulerPidFilePath();
+        if (file_exists($pidFile)) {
+            unlink($pidFile);
+        }
+        Cache::forget(self::SCHEDULER_PID_KEY);
     }
 
     /**
@@ -752,7 +877,10 @@ class QueueController extends Controller
 
         $this->cleanupPidFile();
 
-        return redirect()->back()->with('success', 'Queue worker stopped.');
+        // Also stop the scheduler
+        $this->stopScheduler();
+
+        return redirect()->back()->with('success', 'Queue worker and scheduler stopped.');
     }
 
     /**
@@ -846,5 +974,30 @@ class QueueController extends Controller
             unlink($pidFile);
         }
         Cache::forget(self::WORKER_PID_KEY);
+    }
+
+    /**
+     * Extract or re-extract metadata from a document version.
+     */
+    public function extractVersionMetadata(DocumentVersion $version, VersioningService $versioningService): RedirectResponse
+    {
+        $metadata = $versioningService->reExtractMetadata($version);
+
+        $foundItems = [];
+        if (!empty($metadata['update_date'])) {
+            $foundItems[] = 'update date';
+        }
+        if (!empty($metadata['effective_date'])) {
+            $foundItems[] = 'effective date';
+        }
+        if (!empty($metadata['version'])) {
+            $foundItems[] = 'version';
+        }
+
+        if (empty($foundItems)) {
+            return redirect()->back()->with('info', 'No metadata could be extracted from the document content.');
+        }
+
+        return redirect()->back()->with('success', 'Extracted: ' . implode(', ', $foundItems));
     }
 }

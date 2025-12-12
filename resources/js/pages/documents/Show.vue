@@ -21,6 +21,17 @@ import {
     Type,
     BookOpen,
     FileCode,
+    Brain,
+    AlertTriangle,
+    ShieldCheck,
+    ThumbsUp,
+    ThumbsDown,
+    Lightbulb,
+    HelpCircle,
+    ChevronDown,
+    ChevronUp,
+    History,
+    CircleAlert,
 } from 'lucide-vue-next';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -31,7 +42,7 @@ import {
     CardHeader,
     CardTitle,
 } from '@/components/ui/card';
-import { computed, ref } from 'vue';
+import { computed, ref, onMounted, onUnmounted } from 'vue';
 import { marked } from 'marked';
 
 interface DocumentData {
@@ -56,6 +67,20 @@ interface DocumentData {
     metadata: Record<string, unknown> | null;
 }
 
+interface ExtractedMetadataItem {
+    value: string;
+    raw_match: string;
+    confidence: number;
+    position: string;
+}
+
+interface ExtractedMetadata {
+    update_date?: ExtractedMetadataItem;
+    effective_date?: ExtractedMetadataItem;
+    version?: ExtractedMetadataItem;
+    extracted_at?: string;
+}
+
 interface Version {
     id: number;
     version_number: number;
@@ -68,6 +93,7 @@ interface Version {
     content_hash: string;
     scraped_at: string | null;
     effective_date: string | null;
+    metadata: ExtractedMetadata | null;
 }
 
 interface VersionSummary {
@@ -97,18 +123,179 @@ interface Product {
     is_primary: boolean;
 }
 
+interface FaqItem {
+    question: string;
+    short_answer: string;
+    long_answer: string;
+    risk_level: number;
+    what_to_watch_for: string;
+}
+
+interface FlagItem {
+    type: string;
+    description: string;
+    section_reference?: string;
+    severity: number;
+}
+
+interface Analysis {
+    id: number;
+    analysis_type: string;
+    overall_score: number;
+    overall_rating: string;
+    summary: string | null;
+    key_concerns: string | null;
+    positive_aspects: string | null;
+    recommendations: string | null;
+    extracted_data: {
+        faq?: FaqItem[];
+        dimension_scores?: Record<string, number>;
+        chunk_summaries?: string[];
+    } | null;
+    flags: {
+        red?: FlagItem[];
+        yellow?: FlagItem[];
+        green?: FlagItem[];
+    } | null;
+    model_used: string;
+    tokens_used: number;
+    analysis_cost: number;
+    processing_errors: string[] | null;
+    has_errors: boolean;
+    created_at: string;
+}
+
+interface AnalysisHistoryItem {
+    id: number;
+    analysis_type: string;
+    overall_score: number;
+    overall_rating: string;
+    model_used: string;
+    tokens_used: number;
+    analysis_cost: number;
+    is_current: boolean;
+    has_errors: boolean;
+    error_count: number;
+    created_at: string;
+}
+
+interface PendingAnalysisJob {
+    id: number;
+    status: 'pending' | 'running';
+    created_at: string;
+    started_at: string | null;
+    progress_log: Array<{ timestamp: string; message: string }> | null;
+}
+
 interface Props {
     document: DocumentData;
     currentVersion: Version | null;
     versions: VersionSummary[];
     scrapeJobs: ScrapeJob[];
     products: Product[];
+    analysis: Analysis | null;
+    analysisHistory: AnalysisHistoryItem[];
+    pendingAnalysisJob: PendingAnalysisJob | null;
 }
 
 const props = defineProps<Props>();
 
 const isScraping = ref(false);
+const isExtracting = ref(false);
+const isAnalyzing = ref(false);
 const activeContentTab = ref('rendered');
+const expandedFaqIndex = ref<number | null>(null);
+const showAllFlags = ref(false);
+const showAnalysisHistory = ref(false);
+const showProcessingErrors = ref(false);
+
+let analysisPollingInterval: number | null = null;
+
+// Start polling if there's a pending job
+onMounted(() => {
+    if (props.pendingAnalysisJob) {
+        startAnalysisPolling();
+    }
+});
+
+onUnmounted(() => {
+    stopAnalysisPolling();
+});
+
+function startAnalysisPolling() {
+    if (analysisPollingInterval) return;
+    analysisPollingInterval = window.setInterval(() => {
+        router.reload({
+            only: ['analysis', 'analysisHistory', 'pendingAnalysisJob'],
+            preserveScroll: true,
+            onSuccess: () => {
+                // Stop polling if job is done
+                if (!props.pendingAnalysisJob) {
+                    stopAnalysisPolling();
+                }
+            },
+        });
+    }, 3000);
+}
+
+function stopAnalysisPolling() {
+    if (analysisPollingInterval) {
+        clearInterval(analysisPollingInterval);
+        analysisPollingInterval = null;
+    }
+}
+
+function runAiAnalysis() {
+    isAnalyzing.value = true;
+    router.post(`/documents/${props.document.id}/analyze`, {}, {
+        preserveScroll: true,
+        onFinish: () => {
+            isAnalyzing.value = false;
+            // Start polling after submitting
+            startAnalysisPolling();
+        },
+    });
+}
+
+function toggleFaq(index: number) {
+    expandedFaqIndex.value = expandedFaqIndex.value === index ? null : index;
+}
+
+function getRatingColor(rating: string): string {
+    switch (rating) {
+        case 'A': return 'text-green-600 bg-green-100';
+        case 'B': return 'text-lime-600 bg-lime-100';
+        case 'C': return 'text-yellow-600 bg-yellow-100';
+        case 'D': return 'text-orange-600 bg-orange-100';
+        case 'F': return 'text-red-600 bg-red-100';
+        default: return 'text-gray-600 bg-gray-100';
+    }
+}
+
+function getRatingLabel(rating: string): string {
+    switch (rating) {
+        case 'A': return 'Excellent';
+        case 'B': return 'Good';
+        case 'C': return 'Fair';
+        case 'D': return 'Poor';
+        case 'F': return 'Failing';
+        default: return 'Unknown';
+    }
+}
+
+function formatFlagType(type: string): string {
+    return type.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+}
+
+function reExtractMetadata() {
+    isExtracting.value = true;
+    router.post(`/documents/${props.document.id}/extract-metadata`, {}, {
+        preserveScroll: true,
+        onFinish: () => {
+            isExtracting.value = false;
+        },
+    });
+}
 
 // Prepare HTML for iframe rendering
 const iframeHtml = computed(() => {
@@ -171,6 +358,15 @@ function formatDate(dateString: string | null): string {
         day: 'numeric',
         hour: '2-digit',
         minute: '2-digit',
+    });
+}
+
+function formatDateOnly(dateString: string | null): string {
+    if (!dateString) return 'Unknown';
+    return new Date(dateString).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
     });
 }
 
@@ -378,6 +574,421 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
                             <dd class="mt-1 font-mono text-xs text-muted-foreground">{{ currentVersion.content_hash }}</dd>
                         </div>
                     </dl>
+                </CardContent>
+            </Card>
+
+            <!-- Extracted Metadata -->
+            <Card v-if="currentVersion">
+                <CardHeader>
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <CardTitle>Extracted Metadata</CardTitle>
+                            <CardDescription>Dates and version info extracted from document content</CardDescription>
+                        </div>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            @click="reExtractMetadata"
+                            :disabled="isExtracting"
+                        >
+                            <Loader2 v-if="isExtracting" class="mr-2 h-4 w-4 animate-spin" />
+                            <RefreshCw v-else class="mr-2 h-4 w-4" />
+                            {{ currentVersion.metadata ? 'Re-extract' : 'Extract' }}
+                        </Button>
+                    </div>
+                </CardHeader>
+                <CardContent>
+                    <div v-if="currentVersion.metadata && Object.keys(currentVersion.metadata).length > 0">
+                        <dl class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                            <div v-if="currentVersion.metadata.update_date">
+                                <dt class="text-sm font-medium text-muted-foreground">Last Updated (from document)</dt>
+                                <dd class="mt-1">
+                                    <span class="font-semibold">{{ formatDateOnly(currentVersion.metadata.update_date.value) }}</span>
+                                    <div class="mt-1 flex items-center gap-2">
+                                        <Badge variant="outline" class="text-xs">
+                                            {{ Math.round(currentVersion.metadata.update_date.confidence * 100) }}% confidence
+                                        </Badge>
+                                    </div>
+                                    <p class="mt-1 text-xs text-muted-foreground italic">
+                                        Found: "{{ currentVersion.metadata.update_date.raw_match }}"
+                                    </p>
+                                </dd>
+                            </div>
+                            <div v-if="currentVersion.metadata.effective_date">
+                                <dt class="text-sm font-medium text-muted-foreground">Effective Date</dt>
+                                <dd class="mt-1">
+                                    <span class="font-semibold">{{ formatDateOnly(currentVersion.metadata.effective_date.value) }}</span>
+                                    <div class="mt-1 flex items-center gap-2">
+                                        <Badge variant="outline" class="text-xs">
+                                            {{ Math.round(currentVersion.metadata.effective_date.confidence * 100) }}% confidence
+                                        </Badge>
+                                    </div>
+                                    <p class="mt-1 text-xs text-muted-foreground italic">
+                                        Found: "{{ currentVersion.metadata.effective_date.raw_match }}"
+                                    </p>
+                                </dd>
+                            </div>
+                            <div v-if="currentVersion.metadata.version">
+                                <dt class="text-sm font-medium text-muted-foreground">Document Version</dt>
+                                <dd class="mt-1">
+                                    <Badge variant="secondary" class="text-sm">v{{ currentVersion.metadata.version.value }}</Badge>
+                                    <div class="mt-1 flex items-center gap-2">
+                                        <Badge variant="outline" class="text-xs">
+                                            {{ Math.round(currentVersion.metadata.version.confidence * 100) }}% confidence
+                                        </Badge>
+                                    </div>
+                                    <p class="mt-1 text-xs text-muted-foreground italic">
+                                        Found: "{{ currentVersion.metadata.version.raw_match }}"
+                                    </p>
+                                </dd>
+                            </div>
+                        </dl>
+                        <p v-if="currentVersion.metadata.extracted_at" class="mt-4 text-xs text-muted-foreground">
+                            Extracted: {{ formatDate(currentVersion.metadata.extracted_at) }}
+                        </p>
+                    </div>
+                    <div v-else class="flex flex-col items-center justify-center py-8 text-center">
+                        <Calendar class="h-8 w-8 text-muted-foreground" />
+                        <p class="mt-2 text-sm text-muted-foreground">
+                            No metadata has been extracted yet
+                        </p>
+                        <p class="text-xs text-muted-foreground">
+                            Click "Extract" to parse dates and version info from the document
+                        </p>
+                    </div>
+                </CardContent>
+            </Card>
+
+            <!-- AI Analysis -->
+            <Card v-if="currentVersion">
+                <CardHeader>
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <CardTitle class="flex items-center gap-2">
+                                <Brain class="h-5 w-5" />
+                                AI Analysis
+                                <Badge v-if="pendingAnalysisJob" variant="secondary" class="ml-2">
+                                    <Loader2 class="mr-1 h-3 w-3 animate-spin" />
+                                    {{ pendingAnalysisJob.status === 'running' ? 'Analyzing...' : 'Queued' }}
+                                </Badge>
+                            </CardTitle>
+                            <CardDescription>
+                                AI-powered analysis of document terms and conditions
+                            </CardDescription>
+                        </div>
+                        <Button
+                            @click="runAiAnalysis"
+                            :disabled="isAnalyzing || !!pendingAnalysisJob"
+                            :variant="analysis ? 'outline' : 'default'"
+                        >
+                            <Loader2 v-if="isAnalyzing || pendingAnalysisJob" class="mr-2 h-4 w-4 animate-spin" />
+                            <Brain v-else class="mr-2 h-4 w-4" />
+                            {{ pendingAnalysisJob ? 'Analysis in Progress' : (analysis ? 'Re-analyze' : 'Analyze with AI') }}
+                        </Button>
+                    </div>
+                </CardHeader>
+                <CardContent>
+                    <!-- Analysis In Progress -->
+                    <div v-if="pendingAnalysisJob" class="flex flex-col items-center justify-center py-12 text-center">
+                        <div class="relative">
+                            <Brain class="h-16 w-16 text-primary/30" />
+                            <Loader2 class="h-8 w-8 text-primary animate-spin absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+                        </div>
+                        <h3 class="mt-6 text-lg font-semibold">
+                            {{ pendingAnalysisJob.status === 'running' ? 'Analyzing Document...' : 'Waiting in Queue...' }}
+                        </h3>
+                        <p class="mt-2 text-sm text-muted-foreground max-w-md">
+                            {{ pendingAnalysisJob.status === 'running'
+                                ? 'The AI is reviewing your document. This typically takes 1-3 minutes for large documents.'
+                                : 'Your analysis job is queued. Make sure the queue worker is running.' }}
+                        </p>
+                        <div v-if="pendingAnalysisJob.progress_log?.length" class="mt-4 text-left w-full max-w-md">
+                            <p class="text-xs font-medium text-muted-foreground mb-2">Progress:</p>
+                            <div class="space-y-1 bg-muted/30 rounded p-2 max-h-32 overflow-y-auto">
+                                <div
+                                    v-for="(log, idx) in pendingAnalysisJob.progress_log"
+                                    :key="idx"
+                                    class="text-xs text-muted-foreground"
+                                >
+                                    {{ log.message }}
+                                </div>
+                            </div>
+                        </div>
+                        <p class="mt-4 text-xs text-muted-foreground">
+                            Started {{ formatDate(pendingAnalysisJob.created_at) }}
+                        </p>
+                    </div>
+
+                    <!-- Analysis Results (hidden when job is pending) -->
+                    <div v-else-if="analysis" class="space-y-6">
+                        <!-- Score and Rating -->
+                        <div class="flex items-center gap-6 p-4 bg-muted/30 rounded-lg">
+                            <div class="text-center">
+                                <div
+                                    class="text-4xl font-bold w-16 h-16 rounded-full flex items-center justify-center"
+                                    :class="getRatingColor(analysis.overall_rating)"
+                                >
+                                    {{ analysis.overall_rating }}
+                                </div>
+                                <p class="text-sm text-muted-foreground mt-1">{{ getRatingLabel(analysis.overall_rating) }}</p>
+                            </div>
+                            <div class="flex-1">
+                                <div class="flex items-center gap-2 mb-2">
+                                    <span class="text-2xl font-semibold">{{ analysis.overall_score.toFixed(0) }}/100</span>
+                                    <span class="text-sm text-muted-foreground">Overall Score</span>
+                                </div>
+                                <div class="w-full bg-gray-200 rounded-full h-2.5">
+                                    <div
+                                        class="h-2.5 rounded-full transition-all"
+                                        :class="{
+                                            'bg-green-500': analysis.overall_score >= 80,
+                                            'bg-lime-500': analysis.overall_score >= 60 && analysis.overall_score < 80,
+                                            'bg-yellow-500': analysis.overall_score >= 40 && analysis.overall_score < 60,
+                                            'bg-orange-500': analysis.overall_score >= 20 && analysis.overall_score < 40,
+                                            'bg-red-500': analysis.overall_score < 20,
+                                        }"
+                                        :style="{ width: `${analysis.overall_score}%` }"
+                                    ></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Summary -->
+                        <div v-if="analysis.summary">
+                            <h4 class="font-semibold mb-2">Summary</h4>
+                            <p class="text-sm text-muted-foreground whitespace-pre-line">{{ analysis.summary }}</p>
+                        </div>
+
+                        <!-- Flags Overview -->
+                        <div class="grid gap-4 md:grid-cols-3">
+                            <!-- Red Flags (Concerns) -->
+                            <div class="border rounded-lg p-4">
+                                <div class="flex items-center gap-2 mb-3">
+                                    <AlertTriangle class="h-5 w-5 text-red-500" />
+                                    <h4 class="font-semibold text-red-700">Key Concerns</h4>
+                                    <Badge variant="destructive" class="ml-auto">
+                                        {{ analysis.flags?.red?.length ?? 0 }}
+                                    </Badge>
+                                </div>
+                                <ul v-if="analysis.flags?.red?.length" class="space-y-2 text-sm">
+                                    <li
+                                        v-for="(flag, idx) in (showAllFlags ? analysis.flags.red : analysis.flags.red.slice(0, 3))"
+                                        :key="idx"
+                                        class="flex items-start gap-2"
+                                    >
+                                        <ThumbsDown class="h-4 w-4 text-red-500 flex-shrink-0 mt-0.5" />
+                                        <div>
+                                            <span class="font-medium">{{ formatFlagType(flag.type) }}</span>
+                                            <p class="text-muted-foreground text-xs">{{ flag.description }}</p>
+                                        </div>
+                                    </li>
+                                </ul>
+                                <p v-else class="text-sm text-muted-foreground">No major concerns found</p>
+                            </div>
+
+                            <!-- Yellow Flags (Cautions) -->
+                            <div class="border rounded-lg p-4">
+                                <div class="flex items-center gap-2 mb-3">
+                                    <AlertTriangle class="h-5 w-5 text-yellow-500" />
+                                    <h4 class="font-semibold text-yellow-700">Cautions</h4>
+                                    <Badge variant="secondary" class="ml-auto bg-yellow-100 text-yellow-800">
+                                        {{ analysis.flags?.yellow?.length ?? 0 }}
+                                    </Badge>
+                                </div>
+                                <ul v-if="analysis.flags?.yellow?.length" class="space-y-2 text-sm">
+                                    <li
+                                        v-for="(flag, idx) in (showAllFlags ? analysis.flags.yellow : analysis.flags.yellow.slice(0, 3))"
+                                        :key="idx"
+                                        class="flex items-start gap-2"
+                                    >
+                                        <AlertTriangle class="h-4 w-4 text-yellow-500 flex-shrink-0 mt-0.5" />
+                                        <div>
+                                            <span class="font-medium">{{ formatFlagType(flag.type) }}</span>
+                                            <p class="text-muted-foreground text-xs">{{ flag.description }}</p>
+                                        </div>
+                                    </li>
+                                </ul>
+                                <p v-else class="text-sm text-muted-foreground">No cautions found</p>
+                            </div>
+
+                            <!-- Green Flags (Positives) -->
+                            <div class="border rounded-lg p-4">
+                                <div class="flex items-center gap-2 mb-3">
+                                    <ShieldCheck class="h-5 w-5 text-green-500" />
+                                    <h4 class="font-semibold text-green-700">Positive Aspects</h4>
+                                    <Badge variant="secondary" class="ml-auto bg-green-100 text-green-800">
+                                        {{ analysis.flags?.green?.length ?? 0 }}
+                                    </Badge>
+                                </div>
+                                <ul v-if="analysis.flags?.green?.length" class="space-y-2 text-sm">
+                                    <li
+                                        v-for="(flag, idx) in (showAllFlags ? analysis.flags.green : analysis.flags.green.slice(0, 3))"
+                                        :key="idx"
+                                        class="flex items-start gap-2"
+                                    >
+                                        <ThumbsUp class="h-4 w-4 text-green-500 flex-shrink-0 mt-0.5" />
+                                        <div>
+                                            <span class="font-medium">{{ formatFlagType(flag.type) }}</span>
+                                            <p class="text-muted-foreground text-xs">{{ flag.description }}</p>
+                                        </div>
+                                    </li>
+                                </ul>
+                                <p v-else class="text-sm text-muted-foreground">No positives found</p>
+                            </div>
+                        </div>
+
+                        <!-- Show More/Less Toggle -->
+                        <div
+                            v-if="(analysis.flags?.red?.length ?? 0) > 3 || (analysis.flags?.yellow?.length ?? 0) > 3 || (analysis.flags?.green?.length ?? 0) > 3"
+                            class="text-center"
+                        >
+                            <Button variant="ghost" size="sm" @click="showAllFlags = !showAllFlags">
+                                <component :is="showAllFlags ? ChevronUp : ChevronDown" class="mr-2 h-4 w-4" />
+                                {{ showAllFlags ? 'Show Less' : 'Show All Flags' }}
+                            </Button>
+                        </div>
+
+                        <!-- Recommendations -->
+                        <div v-if="analysis.recommendations" class="border rounded-lg p-4 bg-blue-50">
+                            <div class="flex items-center gap-2 mb-2">
+                                <Lightbulb class="h-5 w-5 text-blue-600" />
+                                <h4 class="font-semibold text-blue-800">Recommendations</h4>
+                            </div>
+                            <p class="text-sm text-blue-900 whitespace-pre-line">{{ analysis.recommendations }}</p>
+                        </div>
+
+                        <!-- FAQ Section -->
+                        <div v-if="analysis.extracted_data?.faq?.length">
+                            <div class="flex items-center gap-2 mb-3">
+                                <HelpCircle class="h-5 w-5" />
+                                <h4 class="font-semibold">Frequently Asked Questions</h4>
+                            </div>
+                            <div class="space-y-2">
+                                <div
+                                    v-for="(faq, idx) in analysis.extracted_data.faq"
+                                    :key="idx"
+                                    class="border rounded-lg overflow-hidden"
+                                >
+                                    <button
+                                        class="w-full flex items-center justify-between p-3 text-left hover:bg-muted/50 transition-colors"
+                                        @click="toggleFaq(idx)"
+                                    >
+                                        <span class="font-medium text-sm">{{ faq.question }}</span>
+                                        <component :is="expandedFaqIndex === idx ? ChevronUp : ChevronDown" class="h-4 w-4 flex-shrink-0" />
+                                    </button>
+                                    <div v-if="expandedFaqIndex === idx" class="px-3 pb-3 pt-1 border-t bg-muted/30">
+                                        <p class="text-sm font-medium mb-1">{{ faq.short_answer }}</p>
+                                        <p class="text-sm text-muted-foreground">{{ faq.long_answer }}</p>
+                                        <div v-if="faq.what_to_watch_for" class="mt-2 text-xs text-amber-700 bg-amber-50 p-2 rounded">
+                                            <strong>Watch for:</strong> {{ faq.what_to_watch_for }}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Processing Errors Warning -->
+                        <div v-if="analysis.has_errors" class="border border-amber-300 bg-amber-50 rounded-lg p-4">
+                            <div class="flex items-center justify-between">
+                                <div class="flex items-center gap-2">
+                                    <CircleAlert class="h-5 w-5 text-amber-600" />
+                                    <span class="font-semibold text-amber-800">
+                                        Analysis completed with {{ analysis.processing_errors?.length }} error(s)
+                                    </span>
+                                </div>
+                                <Button variant="ghost" size="sm" @click="showProcessingErrors = !showProcessingErrors">
+                                    <component :is="showProcessingErrors ? ChevronUp : ChevronDown" class="h-4 w-4" />
+                                </Button>
+                            </div>
+                            <p class="text-sm text-amber-700 mt-1">
+                                Some sections could not be analyzed. The score may be incomplete.
+                            </p>
+                            <div v-if="showProcessingErrors && analysis.processing_errors" class="mt-3 space-y-1">
+                                <div
+                                    v-for="(error, idx) in analysis.processing_errors"
+                                    :key="idx"
+                                    class="text-xs text-amber-900 bg-amber-100 px-2 py-1 rounded"
+                                >
+                                    {{ error }}
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Analysis Meta -->
+                        <div class="flex flex-wrap items-center gap-4 text-xs text-muted-foreground border-t pt-4">
+                            <span>Model: <strong>{{ analysis.model_used }}</strong></span>
+                            <span>Tokens: {{ analysis.tokens_used.toLocaleString() }}</span>
+                            <span v-if="analysis.analysis_cost > 0">Cost: ${{ analysis.analysis_cost.toFixed(4) }}</span>
+                            <span>Analyzed: {{ formatDate(analysis.created_at) }}</span>
+                            <Button
+                                v-if="analysisHistory.length > 1"
+                                variant="ghost"
+                                size="sm"
+                                class="ml-auto"
+                                @click="showAnalysisHistory = !showAnalysisHistory"
+                            >
+                                <History class="mr-1 h-3 w-3" />
+                                History ({{ analysisHistory.length }})
+                            </Button>
+                        </div>
+
+                        <!-- Analysis History -->
+                        <div v-if="showAnalysisHistory && analysisHistory.length > 0" class="border-t pt-4 mt-2">
+                            <h4 class="text-sm font-semibold mb-2 flex items-center gap-2">
+                                <History class="h-4 w-4" />
+                                Analysis History
+                            </h4>
+                            <div class="space-y-2">
+                                <div
+                                    v-for="item in analysisHistory"
+                                    :key="item.id"
+                                    class="flex items-center justify-between text-sm p-2 rounded"
+                                    :class="item.is_current ? 'bg-primary/10 border border-primary/30' : 'bg-muted/30'"
+                                >
+                                    <div class="flex items-center gap-3">
+                                        <div
+                                            class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold"
+                                            :class="getRatingColor(item.overall_rating)"
+                                        >
+                                            {{ item.overall_rating }}
+                                        </div>
+                                        <div>
+                                            <div class="flex items-center gap-2">
+                                                <span class="font-medium">{{ item.model_used }}</span>
+                                                <Badge v-if="item.is_current" variant="outline" class="text-xs">Current</Badge>
+                                                <Badge v-if="item.has_errors" variant="destructive" class="text-xs">
+                                                    {{ item.error_count }} errors
+                                                </Badge>
+                                            </div>
+                                            <div class="text-xs text-muted-foreground">
+                                                Score: {{ item.overall_score.toFixed(0) }}
+                                                &middot; {{ item.tokens_used.toLocaleString() }} tokens
+                                                <span v-if="item.analysis_cost > 0">&middot; ${{ item.analysis_cost.toFixed(4) }}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <span class="text-xs text-muted-foreground">
+                                        {{ formatDate(item.created_at) }}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- No Analysis State -->
+                    <div v-else class="flex flex-col items-center justify-center py-8 text-center">
+                        <Brain class="h-12 w-12 text-muted-foreground" />
+                        <h3 class="mt-4 text-lg font-semibold">No AI Analysis Yet</h3>
+                        <p class="mt-2 text-sm text-muted-foreground max-w-md">
+                            Run an AI analysis to get a plain-English summary of this document's terms,
+                            identify potential concerns, and get answers to common questions.
+                        </p>
+                        <Button class="mt-4" @click="runAiAnalysis" :disabled="isAnalyzing">
+                            <Loader2 v-if="isAnalyzing" class="mr-2 h-4 w-4 animate-spin" />
+                            <Brain v-else class="mr-2 h-4 w-4" />
+                            Analyze with AI
+                        </Button>
+                    </div>
                 </CardContent>
             </Card>
 

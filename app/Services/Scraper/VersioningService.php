@@ -2,15 +2,18 @@
 
 namespace App\Services\Scraper;
 
+use App\Jobs\AnalyzeDocumentVersionJob;
 use App\Models\Document;
 use App\Models\DocumentVersion;
 use App\Models\VersionComparison;
 use App\Services\Scraper\DTO\ScrapeResult;
+use Carbon\Carbon;
 
 class VersioningService
 {
     public function __construct(
         protected DiffService $diffService,
+        protected MetadataExtractorService $metadataExtractor,
     ) {}
 
     /**
@@ -36,6 +39,15 @@ class VersioningService
         // Generate version number
         $versionNumber = $this->generateVersionNumber($document);
 
+        // Extract metadata from content
+        $extractedMetadata = $this->metadataExtractor->extract($result->contentText);
+
+        // Determine effective_date if found
+        $effectiveDate = null;
+        if (!empty($extractedMetadata['effective_date']['value'])) {
+            $effectiveDate = Carbon::parse($extractedMetadata['effective_date']['value']);
+        }
+
         // Create new version
         $version = DocumentVersion::create([
             'document_id' => $document->id,
@@ -48,6 +60,8 @@ class VersioningService
             'character_count' => $result->characterCount,
             'language' => $result->language,
             'scraped_at' => now(),
+            'effective_date' => $effectiveDate,
+            'metadata' => $extractedMetadata,
             'extraction_metadata' => [
                 'http_status' => $result->httpStatus,
                 'final_url' => $result->finalUrl,
@@ -67,6 +81,11 @@ class VersioningService
                 ? $result->finalUrl
                 : $document->canonical_url,
         ]);
+
+        // Queue AI analysis if enabled
+        if (config('llm.default') && config('llm.'.config('llm.default').'.api_key')) {
+            AnalyzeDocumentVersionJob::dispatch($version);
+        }
 
         return $version;
     }
@@ -155,5 +174,26 @@ class VersioningService
         }
 
         return $this->createComparison($oldVersion, $newVersion);
+    }
+
+    /**
+     * Re-extract metadata for an existing version.
+     */
+    public function reExtractMetadata(DocumentVersion $version): array
+    {
+        $extractedMetadata = $this->metadataExtractor->extract($version->content_text ?? '');
+
+        // Determine effective_date if found
+        $effectiveDate = $version->effective_date;
+        if (!empty($extractedMetadata['effective_date']['value'])) {
+            $effectiveDate = Carbon::parse($extractedMetadata['effective_date']['value']);
+        }
+
+        $version->update([
+            'effective_date' => $effectiveDate,
+            'metadata' => $extractedMetadata,
+        ]);
+
+        return $extractedMetadata;
     }
 }

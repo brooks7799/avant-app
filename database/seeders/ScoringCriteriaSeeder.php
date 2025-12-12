@@ -198,6 +198,44 @@ class ScoringCriteriaSeeder extends Seeder
                 'weight' => 1.00,
                 'sort_order' => 19,
             ],
+
+            // Legal Rights Category (Terms of Service specific)
+            [
+                'name' => 'Dispute Resolution Fairness',
+                'slug' => 'dispute-resolution-fairness',
+                'category' => 'legal_rights',
+                'description' => 'Evaluates fairness of dispute resolution mechanisms.',
+                'evaluation_prompt' => 'Are there forced arbitration clauses? Class action waivers? What options do users have for disputes? Score higher for user-friendly dispute resolution.',
+                'weight' => 1.75,
+                'sort_order' => 20,
+            ],
+            [
+                'name' => 'Liability Balance',
+                'slug' => 'liability-balance',
+                'category' => 'legal_rights',
+                'description' => 'Evaluates balance of liability limitations.',
+                'evaluation_prompt' => 'How are liability limitations structured? Are they one-sided? Does the company limit its liability while requiring user indemnification? Score higher for balanced terms.',
+                'weight' => 1.25,
+                'sort_order' => 21,
+            ],
+            [
+                'name' => 'Term Modification Rights',
+                'slug' => 'term-modification-rights',
+                'category' => 'legal_rights',
+                'description' => 'Evaluates how terms can be modified.',
+                'evaluation_prompt' => 'Can the company unilaterally modify terms? Is notice provided? Can users reject changes? Score higher for fair modification processes.',
+                'weight' => 1.25,
+                'sort_order' => 22,
+            ],
+            [
+                'name' => 'Termination Rights',
+                'slug' => 'termination-rights',
+                'category' => 'legal_rights',
+                'description' => 'Evaluates balance of termination rights.',
+                'evaluation_prompt' => 'Can the company terminate accounts without cause? Is there due process? What happens to user data on termination? Score higher for user protections.',
+                'weight' => 1.00,
+                'sort_order' => 23,
+            ],
         ];
 
         foreach ($criteria as $criterion) {

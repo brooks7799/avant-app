@@ -23,6 +23,20 @@ class VersionComparison extends Model
         'similarity_score',
         'change_severity',
         'is_analyzed',
+        // AI analysis fields
+        'ai_change_summary',
+        'ai_impact_analysis',
+        'impact_score_delta',
+        'change_flags',
+        // Suspicious timing
+        'is_suspicious_timing',
+        'suspicious_timing_score',
+        'timing_context',
+        // AI metadata
+        'ai_model_used',
+        'ai_tokens_used',
+        'ai_analysis_cost',
+        'ai_analyzed_at',
     ];
 
     protected function casts(): array
@@ -34,6 +48,13 @@ class VersionComparison extends Model
             'modifications_count' => 'integer',
             'similarity_score' => 'decimal:4',
             'is_analyzed' => 'boolean',
+            'change_flags' => 'array',
+            'is_suspicious_timing' => 'boolean',
+            'suspicious_timing_score' => 'integer',
+            'timing_context' => 'array',
+            'ai_tokens_used' => 'integer',
+            'ai_analysis_cost' => 'decimal:6',
+            'ai_analyzed_at' => 'datetime',
         ];
     }
 

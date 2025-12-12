@@ -16,15 +16,25 @@ class ScrapeDocumentJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $tries = 3;
-    public int $timeout = 120;
-    public int $backoff = 60;
+    public int $tries = 2;
+    public int $timeout = 90; // 90 seconds max per attempt
+    public int $backoff = 30;
+    public int $maxExceptions = 2;
 
     public function __construct(
         public Document $document,
         public ?ScrapeJob $scrapeJob = null,
     ) {
         $this->onQueue(config('scraper.queue.scrape_queue', 'scraping'));
+    }
+
+    /**
+     * Calculate the number of seconds to wait before retrying.
+     */
+    public function retryUntil(): \DateTime
+    {
+        // Give up after 5 minutes total
+        return now()->addMinutes(5);
     }
 
     public function handle(
@@ -87,10 +97,27 @@ class ScrapeDocumentJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
+        // Determine the error message
+        $isTimeout = $exception instanceof \Illuminate\Queue\MaxAttemptsExceededException
+            || str_contains($exception->getMessage(), 'timeout')
+            || str_contains($exception->getMessage(), 'timed out');
+
+        $errorMessage = $isTimeout
+            ? 'Job timed out after ' . $this->timeout . ' seconds'
+            : 'Job failed after all retries: ' . $exception->getMessage();
+
+        // Update the scrape job record if it exists
+        if ($this->scrapeJob) {
+            $this->scrapeJob->refresh();
+            if ($this->scrapeJob->status === 'running') {
+                $this->scrapeJob->markFailed($errorMessage);
+            }
+        }
+
         // Update document status on final failure
         $this->document->update([
             'scrape_status' => 'failed',
-            'scrape_notes' => 'Job failed after all retries: ' . $exception->getMessage(),
+            'scrape_notes' => $errorMessage,
         ]);
     }
 }

@@ -2,11 +2,15 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\AnalyzeDocumentVersionJob;
 use App\Jobs\ScrapeDocumentJob;
+use App\Models\AnalysisJob;
+use App\Models\AnalysisResult;
 use App\Models\Document;
 use App\Models\DocumentType;
 use App\Models\ScrapeJob;
 use App\Models\Website;
+use App\Services\Scraper\VersioningService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -21,7 +25,8 @@ class DocumentController extends Controller
             'website',
             'documentType',
             'versions' => fn ($q) => $q->orderByDesc('scraped_at')->limit(20),
-            'currentVersion',
+            'currentVersion.currentAnalysis',
+            'currentVersion.analysisResults' => fn ($q) => $q->orderByDesc('created_at')->limit(10),
             'scrapeJobs' => fn ($q) => $q->orderByDesc('created_at')->limit(10),
             'products',
         ]);
@@ -60,6 +65,7 @@ class DocumentController extends Controller
                 'content_hash' => $document->currentVersion->content_hash,
                 'scraped_at' => $document->currentVersion->scraped_at?->toISOString(),
                 'effective_date' => $document->currentVersion->effective_date?->toISOString(),
+                'metadata' => $document->currentVersion->metadata,
             ] : null,
             'versions' => $document->versions->map(fn ($v) => [
                 'id' => $v->id,
@@ -85,6 +91,41 @@ class DocumentController extends Controller
                 'type' => $p->type,
                 'is_primary' => $p->pivot->is_primary,
             ]),
+            'analysis' => $document->currentVersion?->currentAnalysis ? [
+                'id' => $document->currentVersion->currentAnalysis->id,
+                'analysis_type' => $document->currentVersion->currentAnalysis->analysis_type,
+                'overall_score' => (float) $document->currentVersion->currentAnalysis->overall_score,
+                'overall_rating' => $document->currentVersion->currentAnalysis->overall_rating,
+                'summary' => $document->currentVersion->currentAnalysis->summary,
+                'key_concerns' => $document->currentVersion->currentAnalysis->key_concerns,
+                'positive_aspects' => $document->currentVersion->currentAnalysis->positive_aspects,
+                'recommendations' => $document->currentVersion->currentAnalysis->recommendations,
+                'extracted_data' => $document->currentVersion->currentAnalysis->extracted_data,
+                'flags' => $document->currentVersion->currentAnalysis->flags,
+                'model_used' => $document->currentVersion->currentAnalysis->model_used,
+                'tokens_used' => $document->currentVersion->currentAnalysis->tokens_used,
+                'analysis_cost' => (float) $document->currentVersion->currentAnalysis->analysis_cost,
+                'processing_errors' => $document->currentVersion->currentAnalysis->processing_errors,
+                'has_errors' => $document->currentVersion->currentAnalysis->hasErrors(),
+                'created_at' => $document->currentVersion->currentAnalysis->created_at->toISOString(),
+            ] : null,
+            'analysisHistory' => $document->currentVersion?->analysisResults?->map(fn ($a) => [
+                'id' => $a->id,
+                'analysis_type' => $a->analysis_type,
+                'overall_score' => (float) $a->overall_score,
+                'overall_rating' => $a->overall_rating,
+                'model_used' => $a->model_used,
+                'tokens_used' => $a->tokens_used,
+                'analysis_cost' => (float) $a->analysis_cost,
+                'is_current' => $a->is_current,
+                'has_errors' => $a->hasErrors(),
+                'error_count' => $a->processing_errors ? count($a->processing_errors) : 0,
+                'created_at' => $a->created_at->toISOString(),
+            ]) ?? [],
+            'pendingAnalysisJob' => $document->currentVersion ? AnalysisJob::where('document_version_id', $document->currentVersion->id)
+                ->whereIn('status', ['pending', 'running'])
+                ->where('created_at', '>', now()->subMinutes(10))
+                ->first()?->only(['id', 'status', 'created_at', 'started_at', 'progress_log']) : null,
         ]);
     }
 
@@ -241,5 +282,115 @@ class DocumentController extends Controller
         }
 
         return redirect()->back()->with('success', "{$created} documents added from discovery.");
+    }
+
+    /**
+     * Extract or re-extract metadata from the current version of a document.
+     */
+    public function extractMetadata(Document $document, VersioningService $versioningService): RedirectResponse
+    {
+        $currentVersion = $document->currentVersion;
+
+        if (!$currentVersion) {
+            return redirect()->back()->with('error', 'No version available for metadata extraction.');
+        }
+
+        $metadata = $versioningService->reExtractMetadata($currentVersion);
+
+        $foundItems = [];
+        if (!empty($metadata['update_date'])) {
+            $foundItems[] = 'update date';
+        }
+        if (!empty($metadata['effective_date'])) {
+            $foundItems[] = 'effective date';
+        }
+        if (!empty($metadata['version'])) {
+            $foundItems[] = 'version';
+        }
+
+        if (empty($foundItems)) {
+            return redirect()->back()->with('info', 'No metadata could be extracted from the document content.');
+        }
+
+        return redirect()->back()->with('success', 'Extracted: ' . implode(', ', $foundItems));
+    }
+
+    /**
+     * Trigger AI analysis for the current version of a document.
+     */
+    public function analyze(Document $document): RedirectResponse
+    {
+        $currentVersion = $document->currentVersion;
+
+        if (!$currentVersion) {
+            return redirect()->back()->with('error', 'No version available for AI analysis. Please retrieve the document first.');
+        }
+
+        // Check if there's already an analysis running (but not stale ones > 10 minutes old)
+        $pendingJob = AnalysisJob::where('document_version_id', $currentVersion->id)
+            ->whereIn('status', ['pending', 'running'])
+            ->where('created_at', '>', now()->subMinutes(10))
+            ->first();
+
+        if ($pendingJob) {
+            return redirect()->back()->with('info', 'An analysis is already in progress for this document.');
+        }
+
+        // Mark any stale pending/running jobs as failed
+        AnalysisJob::where('document_version_id', $currentVersion->id)
+            ->whereIn('status', ['pending', 'running'])
+            ->where('created_at', '<=', now()->subMinutes(10))
+            ->update([
+                'status' => 'failed',
+                'error_message' => 'Job timed out or was abandoned',
+                'completed_at' => now(),
+            ]);
+
+        // Create analysis job record
+        $analysisJob = AnalysisJob::create([
+            'document_version_id' => $currentVersion->id,
+            'analysis_type' => 'full_analysis',
+            'status' => 'pending',
+        ]);
+
+        AnalyzeDocumentVersionJob::dispatch($currentVersion, 'full_analysis', $analysisJob->id);
+
+        return redirect()->back()->with('success', 'AI analysis started. This may take a few minutes.');
+    }
+
+    /**
+     * Get the status of the AI analysis for a document.
+     */
+    public function analysisStatus(Document $document)
+    {
+        $currentVersion = $document->currentVersion;
+
+        if (!$currentVersion) {
+            return response()->json([
+                'status' => 'no_version',
+                'analysis' => null,
+            ]);
+        }
+
+        $analysis = $currentVersion->currentAnalysis;
+
+        return response()->json([
+            'status' => $analysis ? 'completed' : 'pending',
+            'analysis' => $analysis ? [
+                'id' => $analysis->id,
+                'overall_score' => (float) $analysis->overall_score,
+                'overall_rating' => $analysis->overall_rating,
+                'summary' => $analysis->summary,
+                'key_concerns' => $analysis->key_concerns,
+                'positive_aspects' => $analysis->positive_aspects,
+                'recommendations' => $analysis->recommendations,
+                'extracted_data' => $analysis->extracted_data,
+                'flags' => $analysis->flags,
+                'model_used' => $analysis->model_used,
+                'tokens_used' => $analysis->tokens_used,
+                'analysis_cost' => (float) $analysis->analysis_cost,
+                'created_at' => $analysis->created_at->toISOString(),
+            ] : null,
+        ]);
     }
 }

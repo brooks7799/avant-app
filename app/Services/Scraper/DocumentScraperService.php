@@ -62,6 +62,14 @@ class DocumentScraperService
                 'response_headers' => $response->headers(),
             ]);
 
+            // Get final URL and check for geo-restriction redirects
+            $finalUrl = $this->httpClient->getFinalUrl($response) ?? $document->source_url;
+            $redirectIssue = $this->detectRedirectIssue($document->source_url, $finalUrl);
+            if ($redirectIssue) {
+                $job?->logError("Redirect issue: {$redirectIssue}");
+                return ScrapeResult::failure($redirectIssue, $response->status());
+            }
+
             // Validate response is HTML
             $contentType = $response->header('Content-Type') ?? '';
             if (!str_contains($contentType, 'html') && !str_contains($contentType, 'text')) {
@@ -114,9 +122,6 @@ class DocumentScraperService
 
             // Detect language (basic detection)
             $language = $this->detectLanguage($text);
-
-            // Get final URL (after redirects)
-            $finalUrl = $this->httpClient->getFinalUrl($response) ?? $document->source_url;
 
             $wordCount = str_word_count($text);
             $job?->logSuccess("Scrape complete: {$wordCount} words, language: {$language}");
@@ -267,5 +272,67 @@ class DocumentScraperService
         arsort($scores);
 
         return array_key_first($scores) ?? 'en';
+    }
+
+    /**
+     * Detect redirect issues like geo-restrictions or region redirects.
+     */
+    protected function detectRedirectIssue(string $originalUrl, string $finalUrl): ?string
+    {
+        $originalParsed = parse_url($originalUrl);
+        $finalParsed = parse_url($finalUrl);
+
+        $originalHost = $originalParsed['host'] ?? '';
+        $finalHost = $finalParsed['host'] ?? '';
+
+        // Check for cross-domain redirect (common with geo-restrictions)
+        $originalDomain = $this->extractRootDomain($originalHost);
+        $finalDomain = $this->extractRootDomain($finalHost);
+
+        if ($originalDomain !== $finalDomain) {
+            return "Redirected to different domain ({$finalHost}) - possible geo-restriction or block";
+        }
+
+        // Check for region code changes in the URL path
+        $originalPath = $originalParsed['path'] ?? '';
+        $finalPath = $finalParsed['path'] ?? '';
+
+        // Common region patterns: /en-us/, /ko-kr/, /ja-jp/, /de-de/, etc.
+        $regionPattern = '/\/([a-z]{2})-([a-z]{2})\//i';
+
+        preg_match($regionPattern, $originalPath, $originalRegion);
+        preg_match($regionPattern, $finalPath, $finalRegion);
+
+        // If original had a region and we got redirected to a different region
+        if (!empty($originalRegion[0]) && !empty($finalRegion[0]) && $originalRegion[0] !== $finalRegion[0]) {
+            return "Region redirect detected ({$originalRegion[0]} -> {$finalRegion[0]}) - content may differ or be geo-restricted";
+        }
+
+        // Check if we were redirected to a welcome/home page (common with blocks)
+        $blockIndicators = ['/welcome', '/home', '/unavailable', '/error', '/blocked', '/region'];
+        foreach ($blockIndicators as $indicator) {
+            if (str_contains(strtolower($finalPath), $indicator) && !str_contains(strtolower($originalPath), $indicator)) {
+                return "Redirected to {$indicator} page - possible geo-restriction or access block";
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract the root domain from a hostname.
+     */
+    protected function extractRootDomain(string $host): string
+    {
+        // Remove www. prefix
+        $host = preg_replace('/^www\./i', '', $host);
+
+        // Get last two parts (handles co.uk, com.au etc. approximately)
+        $parts = explode('.', $host);
+        if (count($parts) >= 2) {
+            return implode('.', array_slice($parts, -2));
+        }
+
+        return $host;
     }
 }

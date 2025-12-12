@@ -37,6 +37,9 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::delete('documents/{document}', [DocumentController::class, 'destroy'])->name('documents.destroy');
     Route::post('documents/{document}/scrape', [DocumentController::class, 'scrape'])->name('documents.scrape');
     Route::get('documents/{document}/scrape-status', [DocumentController::class, 'scrapeStatus'])->name('documents.scrape-status');
+    Route::post('documents/{document}/extract-metadata', [DocumentController::class, 'extractMetadata'])->name('documents.extract-metadata');
+    Route::post('documents/{document}/analyze', [DocumentController::class, 'analyze'])->name('documents.analyze');
+    Route::get('documents/{document}/analysis-status', [DocumentController::class, 'analysisStatus'])->name('documents.analysis-status');
     Route::post('websites/{website}/documents/from-discovery', [DocumentController::class, 'createFromDiscovery'])->name('websites.documents.from-discovery');
 
     // Product routes
@@ -71,6 +74,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('queue/scrape/{scrapeJob}/status', [QueueController::class, 'scrapeJobStatus'])->name('queue.scrape.status');
     Route::post('queue/scrape/{scrapeJob}/retry', [QueueController::class, 'retryScrapeJob'])->name('queue.scrape.retry');
     Route::get('queue/version/{version}', [QueueController::class, 'showDocumentVersion'])->name('queue.version.show');
+    Route::post('queue/version/{version}/extract-metadata', [QueueController::class, 'extractVersionMetadata'])->name('queue.version.extract-metadata');
 
     // Queue worker control routes
     Route::post('queue/worker/start', [QueueController::class, 'startWorker'])->name('queue.worker.start');

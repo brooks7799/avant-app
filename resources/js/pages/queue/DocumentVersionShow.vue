@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import AppLayout from '@/layouts/AppLayout.vue';
 import { type BreadcrumbItem } from '@/types';
-import { Head, Link } from '@inertiajs/vue3';
+import { Head, Link, router } from '@inertiajs/vue3';
 import {
     FileText,
     ExternalLink,
@@ -15,6 +15,9 @@ import {
     CheckCircle2,
     Eye,
     FileCode,
+    RefreshCw,
+    Loader2,
+    Calendar,
 } from 'lucide-vue-next';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -27,6 +30,20 @@ import {
 } from '@/components/ui/card';
 import { ref, computed } from 'vue';
 import { marked } from 'marked';
+
+interface ExtractedMetadataItem {
+    value: string;
+    raw_match: string;
+    confidence: number;
+    position: string;
+}
+
+interface ExtractedMetadata {
+    update_date?: ExtractedMetadataItem;
+    effective_date?: ExtractedMetadataItem;
+    version?: ExtractedMetadataItem;
+    extracted_at?: string;
+}
 
 interface Version {
     id: number;
@@ -41,7 +58,7 @@ interface Version {
     scraped_at: string | null;
     is_current: boolean;
     extraction_metadata: Record<string, any> | null;
-    metadata: Record<string, any> | null;
+    metadata: ExtractedMetadata | null;
 }
 
 interface DocumentInfo {
@@ -61,6 +78,17 @@ interface Props {
 const props = defineProps<Props>();
 
 const activeTab = ref('rendered');
+const isExtracting = ref(false);
+
+function reExtractMetadata() {
+    isExtracting.value = true;
+    router.post(`/queue/version/${props.version.id}/extract-metadata`, {}, {
+        preserveScroll: true,
+        onFinish: () => {
+            isExtracting.value = false;
+        },
+    });
+}
 
 // Prepare HTML for iframe rendering - wrap in a basic document structure
 // with a base tag to handle relative URLs and some default styling
@@ -113,6 +141,15 @@ function formatDate(dateString: string | null): string {
         day: 'numeric',
         hour: '2-digit',
         minute: '2-digit',
+    });
+}
+
+function formatDateOnly(dateString: string | null): string {
+    if (!dateString) return 'Unknown';
+    return new Date(dateString).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
     });
 }
 
@@ -339,7 +376,89 @@ function formatLanguage(lang: string | null): string {
                 </CardContent>
             </Card>
 
-            <!-- Metadata -->
+            <!-- Extracted Metadata -->
+            <Card>
+                <CardHeader>
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <CardTitle class="text-base">Extracted Metadata</CardTitle>
+                            <CardDescription>Dates and version info extracted from document content</CardDescription>
+                        </div>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            @click="reExtractMetadata"
+                            :disabled="isExtracting"
+                        >
+                            <Loader2 v-if="isExtracting" class="mr-2 h-4 w-4 animate-spin" />
+                            <RefreshCw v-else class="mr-2 h-4 w-4" />
+                            {{ version.metadata ? 'Re-extract' : 'Extract' }}
+                        </Button>
+                    </div>
+                </CardHeader>
+                <CardContent>
+                    <div v-if="version.metadata && Object.keys(version.metadata).length > 0">
+                        <dl class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                            <div v-if="version.metadata.update_date">
+                                <dt class="text-sm font-medium text-muted-foreground">Last Updated (from document)</dt>
+                                <dd class="mt-1">
+                                    <span class="font-semibold">{{ formatDateOnly(version.metadata.update_date.value) }}</span>
+                                    <div class="mt-1 flex items-center gap-2">
+                                        <Badge variant="outline" class="text-xs">
+                                            {{ Math.round(version.metadata.update_date.confidence * 100) }}% confidence
+                                        </Badge>
+                                    </div>
+                                    <p class="mt-1 text-xs text-muted-foreground italic">
+                                        Found: "{{ version.metadata.update_date.raw_match }}"
+                                    </p>
+                                </dd>
+                            </div>
+                            <div v-if="version.metadata.effective_date">
+                                <dt class="text-sm font-medium text-muted-foreground">Effective Date</dt>
+                                <dd class="mt-1">
+                                    <span class="font-semibold">{{ formatDateOnly(version.metadata.effective_date.value) }}</span>
+                                    <div class="mt-1 flex items-center gap-2">
+                                        <Badge variant="outline" class="text-xs">
+                                            {{ Math.round(version.metadata.effective_date.confidence * 100) }}% confidence
+                                        </Badge>
+                                    </div>
+                                    <p class="mt-1 text-xs text-muted-foreground italic">
+                                        Found: "{{ version.metadata.effective_date.raw_match }}"
+                                    </p>
+                                </dd>
+                            </div>
+                            <div v-if="version.metadata.version">
+                                <dt class="text-sm font-medium text-muted-foreground">Document Version</dt>
+                                <dd class="mt-1">
+                                    <Badge variant="secondary" class="text-sm">v{{ version.metadata.version.value }}</Badge>
+                                    <div class="mt-1 flex items-center gap-2">
+                                        <Badge variant="outline" class="text-xs">
+                                            {{ Math.round(version.metadata.version.confidence * 100) }}% confidence
+                                        </Badge>
+                                    </div>
+                                    <p class="mt-1 text-xs text-muted-foreground italic">
+                                        Found: "{{ version.metadata.version.raw_match }}"
+                                    </p>
+                                </dd>
+                            </div>
+                        </dl>
+                        <p v-if="version.metadata.extracted_at" class="mt-4 text-xs text-muted-foreground">
+                            Extracted: {{ formatDate(version.metadata.extracted_at) }}
+                        </p>
+                    </div>
+                    <div v-else class="flex flex-col items-center justify-center py-8 text-center">
+                        <Calendar class="h-8 w-8 text-muted-foreground" />
+                        <p class="mt-2 text-sm text-muted-foreground">
+                            No metadata has been extracted yet
+                        </p>
+                        <p class="text-xs text-muted-foreground">
+                            Click "Extract" to parse dates and version info from the document
+                        </p>
+                    </div>
+                </CardContent>
+            </Card>
+
+            <!-- Technical Metadata -->
             <div class="grid gap-6 md:grid-cols-2">
                 <Card v-if="version.extraction_metadata">
                     <CardHeader>

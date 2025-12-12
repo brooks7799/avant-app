@@ -25,6 +25,7 @@ class AnalysisResult extends Model
         'tokens_used',
         'analysis_cost',
         'is_current',
+        'processing_errors',
     ];
 
     protected function casts(): array
@@ -36,7 +37,13 @@ class AnalysisResult extends Model
             'tokens_used' => 'integer',
             'analysis_cost' => 'decimal:6',
             'is_current' => 'boolean',
+            'processing_errors' => 'array',
         ];
+    }
+
+    public function hasErrors(): bool
+    {
+        return !empty($this->processing_errors);
     }
 
     public function documentVersion(): BelongsTo

@@ -58,6 +58,11 @@ class DocumentVersion extends Model
         return $this->hasMany(AnalysisResult::class);
     }
 
+    public function analysisResults(): HasMany
+    {
+        return $this->hasMany(AnalysisResult::class);
+    }
+
     public function currentAnalysis(): HasOne
     {
         return $this->hasOne(AnalysisResult::class)

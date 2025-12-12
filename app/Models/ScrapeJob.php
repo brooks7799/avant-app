@@ -89,6 +89,12 @@ class ScrapeJob extends Model
             'error_message' => $error,
             'http_status' => $httpStatus,
         ]);
+
+        // Also update the document status
+        $this->document?->update([
+            'scrape_status' => 'failed',
+            'scrape_notes' => $error,
+        ]);
     }
 
     public static function getStatuses(): array

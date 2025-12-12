@@ -18,6 +18,7 @@ import {
     BarChart3,
     Power,
     Eye,
+    Brain,
 } from 'lucide-vue-next';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -66,8 +67,27 @@ interface DiscoveryJob {
     created_at: string;
 }
 
+interface AnalysisJob {
+    id: number;
+    document_version_id: number;
+    document_id: number | null;
+    document_type: string | null;
+    company_name: string | null;
+    analysis_type: string;
+    status: string;
+    model_used: string | null;
+    tokens_used: number | null;
+    analysis_cost: number | null;
+    error_message: string | null;
+    started_at: string | null;
+    completed_at: string | null;
+    duration_ms: number | null;
+    created_at: string;
+}
+
 interface Stats {
     pending_jobs: number;
+    pending_analysis_jobs: number;
     failed_jobs: number;
     total_documents: number;
     monitored_documents: number;
@@ -78,6 +98,8 @@ interface Stats {
     scrape_jobs_success_today: number;
     scrape_jobs_failed_today: number;
     changes_detected_today: number;
+    ai_analyses_total: number;
+    ai_analyses_today: number;
 }
 
 interface WorkerStatus {
@@ -90,6 +112,7 @@ interface Props {
     stats: Stats;
     recentScrapeJobs: ScrapeJob[];
     recentDiscoveryJobs: DiscoveryJob[];
+    recentAnalysisJobs: AnalysisJob[];
     workerStatus: WorkerStatus;
 }
 
@@ -99,7 +122,7 @@ const showStopDialog = ref(false);
 const showClearDialog = ref(false);
 const isRefreshing = ref(false);
 const isWorkerActionPending = ref(false);
-const activeTab = ref<'scrape' | 'discovery'>('scrape');
+const activeTab = ref<'scrape' | 'discovery' | 'analysis'>('scrape');
 const displayUptime = ref(props.workerStatus.uptime);
 
 const breadcrumbs: BreadcrumbItem[] = [
@@ -198,12 +221,24 @@ function refreshData(silent = false) {
         isRefreshing.value = true;
     }
     router.reload({
-        only: ['stats', 'recentScrapeJobs', 'recentDiscoveryJobs', 'workerStatus'],
+        only: ['stats', 'recentScrapeJobs', 'recentDiscoveryJobs', 'recentAnalysisJobs', 'workerStatus'],
         onFinish: () => {
             isRefreshing.value = false;
             syncUptime();
         },
     });
+}
+
+function formatDuration(ms: number | null): string {
+    if (!ms) return '-';
+    if (ms < 1000) return `${ms}ms`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+    return `${(ms / 60000).toFixed(1)}m`;
+}
+
+function formatCost(cost: number | null): string {
+    if (!cost) return '-';
+    return `$${cost.toFixed(4)}`;
 }
 
 function startQueue() {
@@ -571,6 +606,21 @@ function formatRelativeTime(dateString: string): string {
                     <Globe class="mr-2 inline h-4 w-4" />
                     Discovery Jobs
                 </button>
+                <button
+                    :class="[
+                        'px-4 py-2 text-sm font-medium transition-colors cursor-pointer',
+                        activeTab === 'analysis'
+                            ? 'border-b-2 border-primary text-primary'
+                            : 'text-muted-foreground hover:text-foreground'
+                    ]"
+                    @click="activeTab = 'analysis'"
+                >
+                    <Brain class="mr-2 inline h-4 w-4" />
+                    AI Analysis
+                    <Badge v-if="stats.pending_analysis_jobs > 0" variant="secondary" class="ml-2">
+                        {{ stats.pending_analysis_jobs }}
+                    </Badge>
+                </button>
             </div>
 
             <!-- Recent Retrieval Jobs -->
@@ -676,6 +726,78 @@ function formatRelativeTime(dateString: string): string {
                                     </div>
                                     <div v-if="job.status === 'completed'" class="text-xs text-muted-foreground">
                                         Crawled {{ job.urls_crawled }} URLs
+                                    </div>
+                                    <div v-if="job.error_message" class="text-xs text-red-500 truncate max-w-md">
+                                        {{ job.error_message }}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <Badge :variant="getStatusBadgeVariant(job.status)">
+                                    {{ job.status }}
+                                </Badge>
+                                <span class="text-xs text-muted-foreground whitespace-nowrap">
+                                    {{ formatRelativeTime(job.created_at) }}
+                                </span>
+                                <Eye class="h-4 w-4 text-muted-foreground" />
+                            </div>
+                        </Link>
+                    </div>
+                </CardContent>
+            </Card>
+
+            <!-- Recent AI Analysis Jobs -->
+            <Card v-if="activeTab === 'analysis'">
+                <CardHeader>
+                    <CardTitle>Recent AI Analysis Jobs</CardTitle>
+                    <CardDescription>
+                        Last 50 AI analysis jobs
+                        <span v-if="stats.ai_analyses_today > 0" class="ml-2">
+                            ({{ stats.ai_analyses_today }} today, {{ stats.ai_analyses_total }} total)
+                        </span>
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <div v-if="recentAnalysisJobs.length === 0" class="py-8 text-center text-muted-foreground">
+                        <Brain class="h-12 w-12 mx-auto mb-4 opacity-50" />
+                        <p>No AI analysis jobs yet.</p>
+                        <p class="text-sm mt-2">Go to a document page and click "Analyze with AI" to start.</p>
+                    </div>
+                    <div v-else class="space-y-2">
+                        <Link
+                            v-for="job in recentAnalysisJobs"
+                            :key="job.id"
+                            :href="job.document_id ? `/documents/${job.document_id}` : '#'"
+                            class="flex items-center justify-between rounded-lg border p-3 hover:bg-muted/50 transition-colors cursor-pointer"
+                        >
+                            <div class="flex items-center gap-3">
+                                <component
+                                    :is="getStatusIcon(job.status)"
+                                    class="h-5 w-5"
+                                    :class="[
+                                        getStatusColor(job.status),
+                                        job.status === 'running' ? 'animate-spin' : ''
+                                    ]"
+                                />
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <span class="font-medium">{{ job.company_name || 'Unknown' }}</span>
+                                        <Badge variant="outline" class="text-xs">
+                                            {{ job.document_type || 'Document' }}
+                                        </Badge>
+                                        <Badge
+                                            v-if="job.status === 'completed' && job.model_used"
+                                            variant="secondary"
+                                            class="text-xs"
+                                        >
+                                            {{ job.model_used }}
+                                        </Badge>
+                                    </div>
+                                    <div class="text-xs text-muted-foreground">
+                                        {{ job.analysis_type.replace('_', ' ') }}
+                                        <span v-if="job.tokens_used"> &middot; {{ job.tokens_used.toLocaleString() }} tokens</span>
+                                        <span v-if="job.analysis_cost"> &middot; {{ formatCost(job.analysis_cost) }}</span>
+                                        <span v-if="job.duration_ms"> &middot; {{ formatDuration(job.duration_ms) }}</span>
                                     </div>
                                     <div v-if="job.error_message" class="text-xs text-red-500 truncate max-w-md">
                                         {{ job.error_message }}
