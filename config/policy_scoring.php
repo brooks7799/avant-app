@@ -13,12 +13,13 @@ return [
     */
 
     'weights' => [
-        'transparency' => 20,       // How clear and understandable is the policy?
-        'user_rights' => 20,        // What rights do users have over their data?
-        'data_collection' => 20,    // How much data is collected and how?
-        'legal_rights' => 20,       // What legal protections/limitations exist?
-        'fairness_balance' => 10,   // Is the agreement fair and balanced?
-        'notifications' => 10,      // How are users notified of changes?
+        'transparency' => 18,       // How clear and understandable is the policy?
+        'user_rights' => 18,        // What rights do users have over their data?
+        'data_collection' => 18,    // How much data is collected and how?
+        'legal_rights' => 18,       // What legal protections/limitations exist?
+        'fairness_balance' => 8,    // Is the agreement fair and balanced?
+        'notifications' => 8,       // How are users notified of changes?
+        'behavioral_signals' => 12, // Timing patterns (holidays, rapid changes, etc.)
     ],
 
     /*
@@ -76,6 +77,18 @@ return [
         'vague_notification_policy' => ['notifications' => -5],
         'continued_use_consent' => ['notifications' => -8, 'user_rights' => -5],
 
+        // Behavioral Signal Penalties (timing-based red flags)
+        'major_holiday_update' => ['behavioral_signals' => -15, 'transparency' => -5],
+        'minor_holiday_update' => ['behavioral_signals' => -8],
+        'holiday_weekend_update' => ['behavioral_signals' => -10],
+        'weekend_update' => ['behavioral_signals' => -3],
+        'late_night_update' => ['behavioral_signals' => -5],
+        'rapid_changes' => ['behavioral_signals' => -12, 'transparency' => -3],
+        'frequent_changes' => ['behavioral_signals' => -6],
+        'stealth_update' => ['behavioral_signals' => -10, 'notifications' => -5],
+        'friday_afternoon_drop' => ['behavioral_signals' => -7],
+        'suspicious_pattern' => ['behavioral_signals' => -8, 'fairness_balance' => -5],
+
         // Bonuses (positive flags)
         'clear_deletion_rights' => ['user_rights' => +10],
         'easy_opt_out' => ['user_rights' => +8],
@@ -90,6 +103,12 @@ return [
         'encryption_mentioned' => ['data_collection' => +3],
         'limited_retention' => ['data_collection' => +5],
         'user_control' => ['user_rights' => +8],
+
+        // Behavioral Signal Bonuses
+        'consistent_update_schedule' => ['behavioral_signals' => +5],
+        'business_hours_update' => ['behavioral_signals' => +3],
+        'advance_notice_given' => ['behavioral_signals' => +8, 'notifications' => +5],
+        'changelog_provided' => ['behavioral_signals' => +5, 'transparency' => +5],
     ],
 
     /*
@@ -187,6 +206,22 @@ return [
             'vague_notification_policy',
             'continued_use_consent',
             'proactive_notifications',
+        ],
+        'behavioral_signals' => [
+            'major_holiday_update',
+            'minor_holiday_update',
+            'holiday_weekend_update',
+            'weekend_update',
+            'late_night_update',
+            'rapid_changes',
+            'frequent_changes',
+            'stealth_update',
+            'friday_afternoon_drop',
+            'suspicious_pattern',
+            'consistent_update_schedule',
+            'business_hours_update',
+            'advance_notice_given',
+            'changelog_provided',
         ],
     ],
 

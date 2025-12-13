@@ -43,6 +43,7 @@ PROMPT;
     public function __construct(
         protected LlmClientInterface $llmClient,
         protected PolicyScoringService $scoringService,
+        protected BehavioralSignalsService $behavioralSignalsService,
     ) {}
 
     /**
@@ -110,13 +111,34 @@ PROMPT;
         // Step 4: Generate overall summary
         $summary = $this->generateOverallSummary($aggregated, $version);
 
-        // Step 5: Calculate scores
+        // Step 5: Analyze behavioral signals (timing patterns)
+        $behavioralAnalysis = $this->behavioralSignalsService->analyzeVersion($version);
+
+        // Convert behavioral signals to flags for scoring
+        $behavioralFlags = $this->convertBehavioralSignalsToFlags($behavioralAnalysis['signals']);
+        $aggregated['flags']['red'] = array_merge($aggregated['flags']['red'] ?? [], $behavioralFlags['red']);
+        $aggregated['flags']['yellow'] = array_merge($aggregated['flags']['yellow'] ?? [], $behavioralFlags['yellow']);
+
+        // Step 6: Calculate scores (now includes behavioral signals)
         $scoring = $this->scoringService->processAnalysis($aggregated['flags']);
 
-        // Step 6: Generate FAQ
+        // Step 7: Generate FAQ
         $faq = $this->generateFaq($version, $aggregated);
 
-        // Step 7: Create AnalysisResult
+        // Step 8: Extract tags
+        $tags = $this->extractTags($version, $aggregated);
+
+        // Add behavioral signal tags
+        if (!empty($behavioralAnalysis['signals'])) {
+            $tags = array_unique(array_merge($tags, ['timing-concerns']));
+            foreach ($behavioralAnalysis['signals'] as $signal) {
+                if ($signal['type'] === 'major_holiday_update') {
+                    $tags = array_unique(array_merge($tags, ['holiday-update']));
+                }
+            }
+        }
+
+        // Step 9: Create AnalysisResult
         $result = AnalysisResult::create([
             'document_version_id' => $version->id,
             'analysis_type' => $analysisType,
@@ -132,6 +154,8 @@ PROMPT;
                 'chunk_summaries' => array_column($chunkResults, 'plain_summary'),
             ],
             'flags' => $aggregated['flags'],
+            'behavioral_signals' => $behavioralAnalysis,
+            'tags' => $tags,
             'model_used' => $this->llmClient->getModel(),
             'tokens_used' => $this->totalInputTokens + $this->totalOutputTokens,
             'analysis_cost' => $this->estimateCost(),
@@ -541,6 +565,122 @@ PROMPT;
     }
 
     /**
+     * Extract tags that describe what topics this policy covers.
+     */
+    protected function extractTags(DocumentVersion $version, array $aggregated): array
+    {
+        $documentType = $version->document?->documentType?->name ?? 'legal document';
+        $summaries = implode("\n", array_slice($aggregated['summaries'], 0, 3));
+
+        $prompt = <<<PROMPT
+Based on this {$documentType} analysis, identify tags that describe what topics and aspects this policy covers.
+
+Analysis summaries:
+{$summaries}
+
+Flags found:
+- Red: {$this->formatFlagTypesForPrompt($aggregated['flags']['red'] ?? [])}
+- Yellow: {$this->formatFlagTypesForPrompt($aggregated['flags']['yellow'] ?? [])}
+- Green: {$this->formatFlagTypesForPrompt($aggregated['flags']['green'] ?? [])}
+
+Return a JSON array of relevant tags (5-15 tags). Use lowercase with hyphens. Include tags for:
+- Data types collected (e.g., "personal-data", "location-data", "biometric-data", "financial-data", "health-data", "children-data")
+- Sharing practices (e.g., "third-party-sharing", "advertising", "analytics", "affiliate-sharing", "government-disclosure")
+- User rights (e.g., "data-deletion", "opt-out", "data-portability", "access-rights", "correction-rights")
+- Legal/compliance (e.g., "gdpr", "ccpa", "coppa", "arbitration", "class-action-waiver", "jurisdiction")
+- Subscription/billing (e.g., "auto-renewal", "cancellation", "refund", "free-trial", "price-changes")
+- Security (e.g., "encryption", "data-retention", "breach-notification")
+- Account (e.g., "account-termination", "content-license", "user-content")
+
+Example format:
+["personal-data", "third-party-sharing", "data-deletion", "gdpr", "auto-renewal", "arbitration"]
+PROMPT;
+
+        try {
+            $response = $this->llmClient->complete([
+                ['role' => 'system', 'content' => self::SYSTEM_PROMPT],
+                ['role' => 'user', 'content' => $prompt],
+            ], [
+                'temperature' => 0.2,
+                'max_tokens' => $this->getMaxTokens(),
+            ]);
+
+            $this->trackTokens($response);
+
+            $tags = $response->json();
+
+            // Ensure we got an array of strings
+            if (is_array($tags)) {
+                // Filter to only string values and clean them
+                $tags = array_filter($tags, 'is_string');
+                $tags = array_map(fn ($t) => strtolower(trim($t)), $tags);
+                $tags = array_values(array_unique($tags));
+
+                Log::debug('Extracted tags', ['count' => count($tags), 'tags' => $tags]);
+
+                return $tags;
+            }
+
+            return $this->extractTagsFromFlags($aggregated['flags']);
+        } catch (\Exception $e) {
+            Log::warning('Tag extraction via LLM failed, using flag-based extraction', [
+                'error' => $e->getMessage(),
+            ]);
+
+            // Fallback: extract tags from flag types
+            return $this->extractTagsFromFlags($aggregated['flags']);
+        }
+    }
+
+    /**
+     * Extract tags from flags as a fallback.
+     */
+    protected function extractTagsFromFlags(array $flags): array
+    {
+        $tags = [];
+
+        // Map flag types to tags
+        $flagToTag = [
+            'forced_arbitration' => 'arbitration',
+            'class_action_waiver' => 'class-action-waiver',
+            'sell_data' => 'data-selling',
+            'no_deletion_right' => 'no-deletion-rights',
+            'automatic_consent' => 'automatic-consent',
+            'hidden_terms' => 'hidden-terms',
+            'excessive_data_collection' => 'excessive-data',
+            'biometric_data' => 'biometric-data',
+            'vague_data_sharing' => 'vague-sharing',
+            'third_party_sharing' => 'third-party-sharing',
+            'location_tracking' => 'location-data',
+            'one_sided_terms' => 'one-sided-terms',
+            'vague_language' => 'vague-language',
+            'continued_use_consent' => 'implied-consent',
+            'clear_deletion_rights' => 'data-deletion',
+            'easy_opt_out' => 'opt-out',
+            'plain_language' => 'plain-language',
+            'no_data_selling' => 'no-data-selling',
+            'minimal_data_collection' => 'minimal-data',
+            'proactive_notifications' => 'notifications',
+            'data_portability' => 'data-portability',
+            'gdpr_compliant' => 'gdpr',
+        ];
+
+        foreach (['red', 'yellow', 'green'] as $color) {
+            foreach ($flags[$color] ?? [] as $flag) {
+                $type = $flag['type'] ?? '';
+                if (isset($flagToTag[$type])) {
+                    $tags[] = $flagToTag[$type];
+                } else {
+                    // Convert flag type to tag format
+                    $tags[] = str_replace('_', '-', $type);
+                }
+            }
+        }
+
+        return array_values(array_unique($tags));
+    }
+
+    /**
      * Format flag types for inclusion in prompts.
      */
     protected function formatFlagTypesForPrompt(array $flags): string
@@ -622,5 +762,45 @@ PROMPT;
     public function getRawOutputs(): array
     {
         return $this->rawAiOutputs;
+    }
+
+    /**
+     * Convert behavioral signals to the flag format used for scoring.
+     */
+    protected function convertBehavioralSignalsToFlags(array $signals): array
+    {
+        $flags = ['red' => [], 'yellow' => []];
+
+        foreach ($signals as $signal) {
+            $flag = [
+                'type' => $signal['type'],
+                'description' => $signal['description'],
+                'section_reference' => 'Update Timing',
+                'severity' => $this->mapSeverityToScore($signal['severity'] ?? 'medium'),
+            ];
+
+            // Critical and high severity go to red flags
+            if (in_array($signal['severity'] ?? '', ['critical', 'high'])) {
+                $flags['red'][] = $flag;
+            } else {
+                $flags['yellow'][] = $flag;
+            }
+        }
+
+        return $flags;
+    }
+
+    /**
+     * Map severity string to numeric score (1-10).
+     */
+    protected function mapSeverityToScore(string $severity): int
+    {
+        return match ($severity) {
+            'critical' => 10,
+            'high' => 8,
+            'medium' => 6,
+            'low' => 4,
+            default => 5,
+        };
     }
 }

@@ -23,6 +23,11 @@ import {
     Link2,
     Unlink,
     Download,
+    ChevronDown,
+    ChevronRight,
+    Filter,
+    ArrowUpDown,
+    Brain,
 } from 'lucide-vue-next';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -86,6 +91,7 @@ interface Policy {
     version_count: number;
     overall_score: number | null;
     overall_rating: string | null;
+    tags: string[];
     products: ProductLink[];
 }
 
@@ -180,6 +186,142 @@ const selectedWebsiteForDocument = ref<Website | null>(null);
 const selectedProductForLinking = ref<Product | null>(null);
 const expandedWebsites = ref<Set<number>>(new Set(props.websites.map(w => w.id)));
 const expandedProducts = ref<Set<number>>(new Set(props.products.map(p => p.id)));
+
+// Per-website filter and sort state
+type PolicyStatusFilter = 'all' | 'analyzed' | 'ready_to_analyze' | 'pending' | 'failed' | 'not_retrieved';
+type PolicySortBy = 'type' | 'status' | 'date' | 'grade';
+
+const websiteFilters = ref<Record<number, PolicyStatusFilter>>(
+    Object.fromEntries(props.websites.map(w => [w.id, 'all']))
+);
+const websiteSorts = ref<Record<number, PolicySortBy>>(
+    Object.fromEntries(props.websites.map(w => [w.id, 'type']))
+);
+const websiteTagFilters = ref<Record<number, Set<string>>>(
+    Object.fromEntries(props.websites.map(w => [w.id, new Set<string>()]))
+);
+const expandedPolicyLists = ref<Set<number>>(new Set(props.websites.map(w => w.id)));
+
+// Get all unique tags for a website's policies
+function getAllTagsForWebsite(website: Website): string[] {
+    const tags = new Set<string>();
+    for (const policy of website.policies) {
+        if (policy.tags) {
+            for (const tag of policy.tags) {
+                tags.add(tag);
+            }
+        }
+    }
+    return Array.from(tags).sort();
+}
+
+// Toggle a tag in the filter
+function toggleTagFilter(websiteId: number, tag: string) {
+    const current = websiteTagFilters.value[websiteId];
+    if (current.has(tag)) {
+        current.delete(tag);
+    } else {
+        current.add(tag);
+    }
+}
+
+// Clear all tag filters for a website
+function clearTagFilters(websiteId: number) {
+    websiteTagFilters.value[websiteId] = new Set();
+}
+
+function togglePolicyListExpanded(websiteId: number) {
+    if (expandedPolicyLists.value.has(websiteId)) {
+        expandedPolicyLists.value.delete(websiteId);
+    } else {
+        expandedPolicyLists.value.add(websiteId);
+    }
+}
+
+function getFilteredPolicies(website: Website): Policy[] {
+    const filter = websiteFilters.value[website.id] || 'all';
+    const sortBy = websiteSorts.value[website.id] || 'type';
+    const selectedTags = websiteTagFilters.value[website.id] || new Set<string>();
+
+    let policies = [...website.policies];
+
+    // Apply status filter
+    if (filter !== 'all') {
+        policies = policies.filter(p => {
+            switch (filter) {
+                case 'analyzed':
+                    return p.has_version && p.overall_rating !== null;
+                case 'ready_to_analyze':
+                    return p.has_version && p.overall_rating === null;
+                case 'pending':
+                    return p.is_retrieved && p.scrape_status === 'pending';
+                case 'failed':
+                    return p.is_retrieved && (p.scrape_status === 'failed' || p.scrape_status === 'blocked');
+                case 'not_retrieved':
+                    return !p.has_version && !p.is_retrieved;
+                default:
+                    return true;
+            }
+        });
+    }
+
+    // Apply tag filter (must have ALL selected tags)
+    if (selectedTags.size > 0) {
+        policies = policies.filter(p => {
+            if (!p.tags || p.tags.length === 0) return false;
+            for (const tag of selectedTags) {
+                if (!p.tags.includes(tag)) return false;
+            }
+            return true;
+        });
+    }
+
+    // Apply sort
+    policies.sort((a, b) => {
+        switch (sortBy) {
+            case 'type':
+                const typeA = a.document_type || a.detected_type || '';
+                const typeB = b.document_type || b.detected_type || '';
+                return typeA.localeCompare(typeB);
+            case 'status':
+                // Order: Analyzed (0), Ready to Analyze (1), Pending (2), Failed (3), Not Retrieved (4)
+                const getStatusOrder = (p: Policy) => {
+                    if (p.has_version && p.overall_rating !== null) return 0; // Analyzed
+                    if (p.has_version && p.overall_rating === null) return 1; // Ready to Analyze
+                    if (p.is_retrieved && p.scrape_status === 'pending') return 2; // Pending
+                    if (p.is_retrieved && (p.scrape_status === 'failed' || p.scrape_status === 'blocked')) return 3; // Failed
+                    return 4; // Not Retrieved
+                };
+                return getStatusOrder(a) - getStatusOrder(b);
+            case 'date':
+                const dateA = a.last_scraped_at ? new Date(a.last_scraped_at).getTime() : 0;
+                const dateB = b.last_scraped_at ? new Date(b.last_scraped_at).getTime() : 0;
+                return dateB - dateA; // Most recent first
+            case 'grade':
+                // Order: A, B, C, D, F, then unanalyzed
+                const gradeOrder: Record<string, number> = { 'A': 0, 'B': 1, 'C': 2, 'D': 3, 'F': 4 };
+                const gradeA = a.overall_rating ? gradeOrder[a.overall_rating] ?? 5 : 6;
+                const gradeB = b.overall_rating ? gradeOrder[b.overall_rating] ?? 5 : 6;
+                return gradeA - gradeB;
+            default:
+                return 0;
+        }
+    });
+
+    return policies;
+}
+
+function getPolicyStatusCounts(website: Website) {
+    const policies = website.policies;
+    return {
+        all: policies.length,
+        analyzed: policies.filter(p => p.has_version && p.overall_rating !== null).length,
+        ready_to_analyze: policies.filter(p => p.has_version && p.overall_rating === null).length,
+        pending: policies.filter(p => p.is_retrieved && p.scrape_status === 'pending').length,
+        failed: policies.filter(p => p.is_retrieved && (p.scrape_status === 'failed' || p.scrape_status === 'blocked')).length,
+        not_retrieved: policies.filter(p => !p.has_version && !p.is_retrieved).length,
+    };
+}
 
 const websiteForm = useForm({
     url: '',
@@ -450,6 +592,8 @@ function navigateToPolicyDetail(policyIndex: number) {
 
 const retrievingPolicies = ref<Set<string>>(new Set());
 const retrievingAllForWebsite = ref<Set<number>>(new Set());
+const analyzingPolicies = ref<Set<number>>(new Set());
+const analyzingAllForWebsite = ref<Set<number>>(new Set());
 
 function retrievePolicy(website: Website, policy: Policy, event: Event) {
     event.stopPropagation();
@@ -494,6 +638,42 @@ function isPolicyRetrieving(policy: Policy): boolean {
     return retrievingPolicies.value.has(`${policy.discovery_job_id}-${policy.discovery_index}`);
 }
 
+function analyzePolicy(policy: Policy, event: Event) {
+    event.stopPropagation();
+    if (!policy.document_id) return;
+
+    analyzingPolicies.value.add(policy.document_id);
+
+    router.post(`/documents/${policy.document_id}/analyze`, {}, {
+        preserveScroll: true,
+        onFinish: () => {
+            analyzingPolicies.value.delete(policy.document_id!);
+        },
+    });
+}
+
+function analyzeAllPolicies(website: Website, event: Event) {
+    event.stopPropagation();
+
+    analyzingAllForWebsite.value.add(website.id);
+
+    router.post(`/websites/${website.id}/analyze-all`, {}, {
+        preserveScroll: true,
+        onFinish: () => {
+            analyzingAllForWebsite.value.delete(website.id);
+        },
+    });
+}
+
+function isPolicyAnalyzing(policy: Policy): boolean {
+    if (!policy.document_id) return false;
+    return analyzingPolicies.value.has(policy.document_id);
+}
+
+function hasReadyToAnalyzePolicies(website: Website): boolean {
+    return website.policies.some(p => p.has_version && p.overall_rating === null);
+}
+
 function hasUnretrievedPolicies(website: Website): boolean {
     return website.policies.some(p => !p.has_version);
 }
@@ -511,6 +691,90 @@ function formatDocumentType(type: string | null): string {
             return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
         })
         .join(' ');
+}
+
+function extractTypeFromUrl(url: string): string | null {
+    try {
+        const urlObj = new URL(url);
+        const path = urlObj.pathname.toLowerCase();
+
+        // Common policy URL patterns
+        const patterns: [RegExp, string][] = [
+            [/privacy[-_]?policy|privacy[-_]?notice|data[-_]?privacy/i, 'Privacy Policy'],
+            [/terms[-_]?(of[-_]?)?(service|use)|tos\b/i, 'Terms of Service'],
+            [/cookie[-_]?(policy|notice|preferences)/i, 'Cookie Policy'],
+            [/cancellation[-_]?(and[-_]?)?refund|refund[-_]?policy/i, 'Cancellation and Refund Policy'],
+            [/subscription[-_]?(terms|agreement)/i, 'Subscription Agreement'],
+            [/user[-_]?agreement/i, 'User Agreement'],
+            [/acceptable[-_]?use/i, 'Acceptable Use Policy'],
+            [/dmca|copyright[-_]?(policy|notice)/i, 'DMCA Policy'],
+            [/community[-_]?(guidelines|standards)/i, 'Community Guidelines'],
+            [/content[-_]?(policy|guidelines)/i, 'Content Policy'],
+            [/children|coppa|kids[-_]?privacy/i, 'Children\'s Privacy Policy'],
+            [/ccpa|california[-_]?privacy/i, 'California Privacy Notice'],
+            [/gdpr|eu[-_]?privacy/i, 'GDPR Privacy Notice'],
+            [/data[-_]?(processing|protection)[-_]?(agreement|addendum)/i, 'Data Processing Agreement'],
+            [/legal[-_]?(notice|disclaimer)/i, 'Legal Notice'],
+            [/disclaimer/i, 'Disclaimer'],
+            [/eula|end[-_]?user[-_]?license/i, 'End User License Agreement'],
+            [/billing|payment[-_]?(terms|policy)/i, 'Billing Terms'],
+            [/shipping[-_]?(policy|terms)/i, 'Shipping Policy'],
+            [/return[-_]?(policy|terms)/i, 'Return Policy'],
+        ];
+
+        for (const [pattern, name] of patterns) {
+            if (pattern.test(path)) {
+                return name;
+            }
+        }
+
+        // Try to extract from path segments
+        const segments = path.split('/').filter(s => s.length > 0);
+        const lastSegment = segments[segments.length - 1];
+
+        if (lastSegment) {
+            // Clean up the segment and format it
+            const cleaned = lastSegment
+                .replace(/\.(html?|php|aspx?)$/i, '')
+                .replace(/[-_]+/g, ' ')
+                .trim();
+
+            if (cleaned.length > 2 && cleaned.length < 50) {
+                // Title case it
+                const smallWords = ['of', 'the', 'a', 'an', 'and', 'or', 'for', 'to', 'in', 'on'];
+                return cleaned
+                    .split(' ')
+                    .map((word, index) => {
+                        if (index > 0 && smallWords.includes(word.toLowerCase())) {
+                            return word.toLowerCase();
+                        }
+                        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+                    })
+                    .join(' ');
+            }
+        }
+
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+function getPolicyDisplayName(policy: Policy): string {
+    // First try document_type from DB
+    if (policy.document_type) {
+        return policy.document_type;
+    }
+    // Then try detected_type from crawler
+    if (policy.detected_type) {
+        return formatDocumentType(policy.detected_type);
+    }
+    // Finally try to extract from URL
+    const urlDerived = extractTypeFromUrl(policy.url);
+    if (urlDerived) {
+        return urlDerived;
+    }
+    return 'Unknown Policy';
 }
 </script>
 
@@ -1011,26 +1275,145 @@ function formatDocumentType(type: string | null): string {
                                         <span class="text-muted-foreground">
                                             {{ website.latest_discovery.urls_crawled }} pages crawled
                                         </span>
-                                        <Button
-                                            v-if="hasUnretrievedPolicies(website)"
-                                            size="sm"
-                                            @click="retrieveAllPolicies(website, $event)"
-                                            :disabled="retrievingAllForWebsite.has(website.id)"
-                                        >
-                                            <Loader2 v-if="retrievingAllForWebsite.has(website.id)" class="mr-2 h-4 w-4 animate-spin" />
-                                            <Download v-else class="mr-2 h-4 w-4" />
-                                            Retrieve All
-                                        </Button>
+                                        <div class="flex items-center gap-2">
+                                            <Button
+                                                v-if="hasUnretrievedPolicies(website)"
+                                                size="sm"
+                                                variant="outline"
+                                                @click="retrieveAllPolicies(website, $event)"
+                                                :disabled="retrievingAllForWebsite.has(website.id)"
+                                            >
+                                                <Loader2 v-if="retrievingAllForWebsite.has(website.id)" class="mr-2 h-4 w-4 animate-spin" />
+                                                <Download v-else class="mr-2 h-4 w-4" />
+                                                Retrieve All
+                                            </Button>
+                                            <Button
+                                                v-if="hasReadyToAnalyzePolicies(website)"
+                                                size="sm"
+                                                @click="analyzeAllPolicies(website, $event)"
+                                                :disabled="analyzingAllForWebsite.has(website.id)"
+                                            >
+                                                <Loader2 v-if="analyzingAllForWebsite.has(website.id)" class="mr-2 h-4 w-4 animate-spin" />
+                                                <Brain v-else class="mr-2 h-4 w-4" />
+                                                Analyze All
+                                            </Button>
+                                        </div>
                                     </div>
 
-                                    <!-- Unified Policies List -->
+                                    <!-- Policies Section with Filter/Sort -->
                                     <div v-if="website.policies.length === 0" class="py-4 text-center text-sm text-muted-foreground">
                                         No policies discovered for this website yet.
                                     </div>
-                                    <div v-else class="space-y-2">
+                                    <div v-else>
+                                        <!-- Collapsible Header -->
                                         <button
-                                            v-for="policy in website.policies"
-                                            :key="policy.url"
+                                            type="button"
+                                            class="w-full flex items-center justify-between py-2 text-sm font-medium hover:bg-muted/30 rounded px-2 -mx-2"
+                                            @click="togglePolicyListExpanded(website.id)"
+                                        >
+                                            <div class="flex items-center gap-2">
+                                                <ChevronDown v-if="expandedPolicyLists.has(website.id)" class="h-4 w-4" />
+                                                <ChevronRight v-else class="h-4 w-4" />
+                                                <span>
+                                                    {{ website.policies.length }} Polic{{ website.policies.length !== 1 ? 'ies' : 'y' }}
+                                                </span>
+                                                <Badge v-if="getPolicyStatusCounts(website).analyzed > 0" class="text-xs bg-green-500 text-white">
+                                                    {{ getPolicyStatusCounts(website).analyzed }} analyzed
+                                                </Badge>
+                                                <Badge v-if="getPolicyStatusCounts(website).ready_to_analyze > 0" class="text-xs bg-green-200 text-green-800">
+                                                    {{ getPolicyStatusCounts(website).ready_to_analyze }} ready
+                                                </Badge>
+                                                <Badge v-if="getPolicyStatusCounts(website).failed > 0" variant="destructive" class="text-xs">
+                                                    {{ getPolicyStatusCounts(website).failed }} failed
+                                                </Badge>
+                                            </div>
+                                        </button>
+
+                                        <!-- Filter/Sort Bar (only when expanded) -->
+                                        <div v-if="expandedPolicyLists.has(website.id)" class="flex flex-wrap items-center gap-2 py-3 border-b mb-3">
+                                            <div class="flex items-center gap-1 flex-wrap">
+                                                <Filter class="h-3 w-3 text-muted-foreground" />
+                                                <span class="text-xs text-muted-foreground mr-1">Filter:</span>
+                                                <Button
+                                                    v-for="filter in [
+                                                        { value: 'all', label: 'All' },
+                                                        { value: 'analyzed', label: 'Analyzed' },
+                                                        { value: 'ready_to_analyze', label: 'Ready to Analyze' },
+                                                        { value: 'pending', label: 'Pending' },
+                                                        { value: 'failed', label: 'Failed' },
+                                                        { value: 'not_retrieved', label: 'Not Retrieved' },
+                                                    ] as const"
+                                                    :key="filter.value"
+                                                    :variant="websiteFilters[website.id] === filter.value ? 'default' : 'outline'"
+                                                    size="sm"
+                                                    class="h-6 text-xs px-2"
+                                                    @click="websiteFilters[website.id] = filter.value"
+                                                >
+                                                    {{ filter.label }}
+                                                    <span v-if="getPolicyStatusCounts(website)[filter.value] > 0" class="ml-1 opacity-70">
+                                                        ({{ getPolicyStatusCounts(website)[filter.value] }})
+                                                    </span>
+                                                </Button>
+                                            </div>
+                                            <div class="h-4 w-px bg-border" />
+                                            <div class="flex items-center gap-1">
+                                                <ArrowUpDown class="h-3 w-3 text-muted-foreground" />
+                                                <span class="text-xs text-muted-foreground mr-1">Sort:</span>
+                                                <Button
+                                                    v-for="sort in [
+                                                        { value: 'type', label: 'Type' },
+                                                        { value: 'status', label: 'Status' },
+                                                        { value: 'date', label: 'Date' },
+                                                        { value: 'grade', label: 'Grade' },
+                                                    ] as const"
+                                                    :key="sort.value"
+                                                    :variant="websiteSorts[website.id] === sort.value ? 'default' : 'outline'"
+                                                    size="sm"
+                                                    class="h-6 text-xs px-2"
+                                                    @click="websiteSorts[website.id] = sort.value"
+                                                >
+                                                    {{ sort.label }}
+                                                </Button>
+                                            </div>
+                                        </div>
+
+                                        <!-- Tag Filter (only when there are tags) -->
+                                        <div v-if="expandedPolicyLists.has(website.id) && getAllTagsForWebsite(website).length > 0" class="flex flex-wrap items-center gap-2 py-2 border-b mb-3">
+                                            <span class="text-xs text-muted-foreground">Tags:</span>
+                                            <div class="flex flex-wrap gap-1">
+                                                <Button
+                                                    v-for="tag in getAllTagsForWebsite(website)"
+                                                    :key="tag"
+                                                    :variant="websiteTagFilters[website.id]?.has(tag) ? 'default' : 'outline'"
+                                                    size="sm"
+                                                    class="h-5 text-xs px-2"
+                                                    @click="toggleTagFilter(website.id, tag)"
+                                                >
+                                                    {{ tag }}
+                                                </Button>
+                                            </div>
+                                            <Button
+                                                v-if="websiteTagFilters[website.id]?.size > 0"
+                                                variant="ghost"
+                                                size="sm"
+                                                class="h-5 text-xs text-muted-foreground"
+                                                @click="clearTagFilters(website.id)"
+                                            >
+                                                Clear
+                                            </Button>
+                                        </div>
+
+                                        <!-- Policies List (collapsible) -->
+                                        <div v-if="expandedPolicyLists.has(website.id)" class="space-y-2">
+                                            <div
+                                                v-if="getFilteredPolicies(website).length === 0"
+                                                class="py-4 text-center text-sm text-muted-foreground"
+                                            >
+                                                No policies match the current filter.
+                                            </div>
+                                            <button
+                                                v-for="policy in getFilteredPolicies(website)"
+                                                :key="policy.url"
                                             type="button"
                                             class="w-full text-left flex items-start justify-between gap-3 rounded-lg border p-3 hover:bg-muted/30 transition-colors cursor-pointer"
                                             @click="navigateToPolicyDetail(getGlobalPolicyIndex(website.id, policy.url))"
@@ -1049,14 +1432,19 @@ function formatDocumentType(type: string | null): string {
                                                 <div class="min-w-0 flex-1">
                                                     <div class="flex items-center gap-2 flex-wrap">
                                                         <span class="font-medium">
-                                                            {{ policy.document_type || formatDocumentType(policy.detected_type) }}
+                                                            {{ getPolicyDisplayName(policy) }}
                                                         </span>
                                                         <Badge
-                                                            v-if="policy.has_version"
-                                                            variant="default"
-                                                            class="text-xs"
+                                                            v-if="policy.has_version && policy.overall_rating !== null"
+                                                            class="text-xs bg-green-500 text-white"
                                                         >
-                                                            Retrieved
+                                                            Analyzed
+                                                        </Badge>
+                                                        <Badge
+                                                            v-else-if="policy.has_version"
+                                                            class="text-xs bg-green-200 text-green-800"
+                                                        >
+                                                            Ready to Analyze
                                                         </Badge>
                                                         <Badge
                                                             v-else-if="policy.is_retrieved && policy.scrape_status === 'pending'"
@@ -1079,6 +1467,35 @@ function formatDocumentType(type: string | null): string {
                                                         >
                                                             Not Retrieved
                                                         </Badge>
+                                                        <!-- Grade badge for analyzed policies -->
+                                                        <Badge
+                                                            v-if="policy.overall_rating"
+                                                            :class="[
+                                                                'text-xs font-bold',
+                                                                policy.overall_rating === 'A' ? 'bg-green-500 text-white' :
+                                                                policy.overall_rating === 'B' ? 'bg-lime-500 text-white' :
+                                                                policy.overall_rating === 'C' ? 'bg-yellow-500 text-white' :
+                                                                policy.overall_rating === 'D' ? 'bg-orange-500 text-white' :
+                                                                'bg-red-500 text-white'
+                                                            ]"
+                                                        >
+                                                            {{ policy.overall_rating }}
+                                                        </Badge>
+                                                        <!-- Tags -->
+                                                        <Badge
+                                                            v-for="tag in (policy.tags || []).slice(0, 3)"
+                                                            :key="tag"
+                                                            variant="outline"
+                                                            class="text-xs text-muted-foreground"
+                                                        >
+                                                            {{ tag }}
+                                                        </Badge>
+                                                        <span
+                                                            v-if="policy.tags && policy.tags.length > 3"
+                                                            class="text-xs text-muted-foreground"
+                                                        >
+                                                            +{{ policy.tags.length - 3 }}
+                                                        </span>
                                                         <Badge
                                                             v-if="policy.confidence >= 0.9"
                                                             variant="secondary"
@@ -1131,6 +1548,19 @@ function formatDocumentType(type: string | null): string {
                                                     <Download v-else class="mr-1 h-3 w-3" />
                                                     Retrieve
                                                 </Button>
+                                                <!-- Analyze button (for policies with versions but no analysis) -->
+                                                <Button
+                                                    v-if="policy.has_version && policy.overall_rating === null"
+                                                    variant="default"
+                                                    size="sm"
+                                                    title="Analyze with AI"
+                                                    @click="analyzePolicy(policy, $event)"
+                                                    :disabled="isPolicyAnalyzing(policy)"
+                                                >
+                                                    <Loader2 v-if="isPolicyAnalyzing(policy)" class="mr-1 h-3 w-3 animate-spin" />
+                                                    <Brain v-else class="mr-1 h-3 w-3" />
+                                                    Analyze
+                                                </Button>
                                                 <!-- Re-retrieve button (for policies with versions) -->
                                                 <Button
                                                     v-if="policy.has_version"
@@ -1157,6 +1587,7 @@ function formatDocumentType(type: string | null): string {
                                                 </a>
                                             </div>
                                         </button>
+                                        </div>
                                     </div>
                                 </CardContent>
                             </CollapsibleContent>

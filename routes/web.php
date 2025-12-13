@@ -4,6 +4,7 @@ use App\Http\Controllers\CompanyController;
 use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\QueueController;
+use App\Http\Controllers\VersionComparisonController;
 use App\Http\Controllers\WebsiteController;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
@@ -29,6 +30,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::delete('websites/{website}', [WebsiteController::class, 'destroy'])->name('websites.destroy');
     Route::post('websites/{website}/discover', [WebsiteController::class, 'discover'])->name('websites.discover');
     Route::get('websites/{website}/discovery-status', [WebsiteController::class, 'discoveryStatus'])->name('websites.discovery-status');
+    Route::post('websites/{website}/analyze-all', [WebsiteController::class, 'analyzeAll'])->name('websites.analyze-all');
 
     // Document routes
     Route::get('documents/{document}', [DocumentController::class, 'show'])->name('documents.show');
@@ -75,6 +77,10 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::post('queue/scrape/{scrapeJob}/retry', [QueueController::class, 'retryScrapeJob'])->name('queue.scrape.retry');
     Route::get('queue/version/{version}', [QueueController::class, 'showDocumentVersion'])->name('queue.version.show');
     Route::post('queue/version/{version}/extract-metadata', [QueueController::class, 'extractVersionMetadata'])->name('queue.version.extract-metadata');
+
+    // Version comparison routes
+    Route::get('documents/{document}/compare/{oldVersion}/{newVersion}', [VersionComparisonController::class, 'show'])->name('documents.compare');
+    Route::get('documents/{document}/compare/{oldVersion}/{newVersion}/summary', [VersionComparisonController::class, 'summary'])->name('documents.compare.summary');
 
     // Queue worker control routes
     Route::post('queue/worker/start', [QueueController::class, 'startWorker'])->name('queue.worker.start');

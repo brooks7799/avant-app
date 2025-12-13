@@ -32,6 +32,8 @@ import {
     ChevronUp,
     History,
     CircleAlert,
+    GitCompare,
+    ArrowRight,
 } from 'lucide-vue-next';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -208,6 +210,60 @@ const expandedFaqIndex = ref<number | null>(null);
 const showAllFlags = ref(false);
 const showAnalysisHistory = ref(false);
 const showProcessingErrors = ref(false);
+
+// Version comparison state
+const compareMode = ref(false);
+const selectedVersions = ref<number[]>([]);
+
+function toggleCompareMode() {
+    compareMode.value = !compareMode.value;
+    if (!compareMode.value) {
+        selectedVersions.value = [];
+    }
+}
+
+function toggleVersionSelection(versionId: number) {
+    const index = selectedVersions.value.indexOf(versionId);
+    if (index >= 0) {
+        selectedVersions.value.splice(index, 1);
+    } else if (selectedVersions.value.length < 2) {
+        selectedVersions.value.push(versionId);
+    }
+}
+
+function isVersionSelected(versionId: number): boolean {
+    return selectedVersions.value.includes(versionId);
+}
+
+function canCompare(): boolean {
+    return selectedVersions.value.length === 2;
+}
+
+function getCompareUrl(): string {
+    if (selectedVersions.value.length !== 2) return '';
+    // Sort so older version is first (lower ID typically means older)
+    const sorted = [...selectedVersions.value].sort((a, b) => a - b);
+    return `/documents/${props.document.id}/compare/${sorted[0]}/${sorted[1]}`;
+}
+
+function getPreviousVersion(versionIndex: number): VersionSummary | null {
+    // versions are sorted by scraped_at desc, so next index is the previous version
+    if (versionIndex < props.versions.length - 1) {
+        return props.versions[versionIndex + 1];
+    }
+    return null;
+}
+
+function handleCompareClick() {
+    if (!compareMode.value) {
+        // First click - enter compare mode
+        compareMode.value = true;
+    } else if (canCompare()) {
+        // Second click with 2 versions selected - navigate to compare page
+        window.location.href = getCompareUrl();
+    }
+    // If in compare mode but less than 2 selected, do nothing (button shows "Select 2 Versions")
+}
 
 let analysisPollingInterval: number | null = null;
 
@@ -1136,18 +1192,87 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
             <!-- Version History -->
             <Card v-if="versions.length > 0">
                 <CardHeader>
-                    <CardTitle>Version History</CardTitle>
-                    <CardDescription>Previous versions of this document</CardDescription>
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <CardTitle class="flex items-center gap-2">
+                                <History class="h-5 w-5" />
+                                Version History
+                            </CardTitle>
+                            <CardDescription>
+                                {{ versions.length }} version{{ versions.length !== 1 ? 's' : '' }} tracked
+                            </CardDescription>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <!-- Cancel button when in compare mode -->
+                            <Button
+                                v-if="compareMode"
+                                variant="outline"
+                                size="sm"
+                                @click="toggleCompareMode"
+                            >
+                                Cancel
+                            </Button>
+                            <!-- Main Compare Versions button -->
+                            <Button
+                                v-if="versions.length >= 2"
+                                :class="{
+                                    'bg-green-600 hover:bg-green-700 text-white': canCompare(),
+                                }"
+                                size="sm"
+                                @click="handleCompareClick"
+                            >
+                                <GitCompare class="mr-2 h-4 w-4" />
+                                <span v-if="!compareMode">Compare Versions</span>
+                                <span v-else-if="canCompare()">Compare Now</span>
+                                <span v-else>Select 2 Versions</span>
+                            </Button>
+                        </div>
+                    </div>
                 </CardHeader>
                 <CardContent>
+                    <!-- Compare mode instructions -->
+                    <div v-if="compareMode && !canCompare()" class="mb-4 rounded-lg bg-blue-50 p-3 dark:bg-blue-950/30">
+                        <p class="text-sm text-blue-700 dark:text-blue-300">
+                            <GitCompare class="mr-2 inline h-4 w-4" />
+                            Select {{ 2 - selectedVersions.length }} version{{ selectedVersions.length === 1 ? '' : 's' }} to compare by clicking the checkboxes below
+                        </p>
+                    </div>
+
+                    <!-- Ready to compare message -->
+                    <div v-if="compareMode && canCompare()" class="mb-4 rounded-lg bg-green-50 p-3 dark:bg-green-950/30">
+                        <p class="text-sm text-green-700 dark:text-green-300">
+                            <GitCompare class="mr-2 inline h-4 w-4" />
+                            2 versions selected! Click the green <strong>Compare Now</strong> button above to view the diff.
+                        </p>
+                    </div>
+
                     <div class="space-y-2">
                         <div
-                            v-for="version in versions"
+                            v-for="(version, versionIndex) in versions"
                             :key="version.id"
-                            class="flex items-center justify-between rounded-lg border p-3"
-                            :class="{ 'bg-muted/50': version.is_current }"
+                            class="flex items-center justify-between rounded-lg border p-3 transition-colors"
+                            :class="{
+                                'bg-muted/50': version.is_current && !compareMode,
+                                'bg-green-50 dark:bg-green-950/30 border-green-400': compareMode && isVersionSelected(version.id),
+                                'cursor-pointer hover:bg-muted/50': compareMode,
+                            }"
+                            @click="compareMode && toggleVersionSelection(version.id)"
                         >
                             <div class="flex items-center gap-3">
+                                <!-- Checkbox in compare mode -->
+                                <div
+                                    v-if="compareMode"
+                                    class="flex h-6 w-6 items-center justify-center rounded border-2 transition-colors"
+                                    :class="{
+                                        'border-green-500 bg-green-500 text-white': isVersionSelected(version.id),
+                                        'border-gray-300 hover:border-gray-400': !isVersionSelected(version.id),
+                                    }"
+                                >
+                                    <svg v-if="isVersionSelected(version.id)" class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+
                                 <div class="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-sm font-medium">
                                     v{{ version.version_number }}
                                 </div>
@@ -1163,9 +1288,16 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
                                     </p>
                                 </div>
                             </div>
-                            <span class="font-mono text-xs text-muted-foreground">
-                                {{ version.content_hash.substring(0, 12) }}...
-                            </span>
+                            <div class="flex items-center gap-3">
+                                <span class="font-mono text-xs text-muted-foreground">
+                                    {{ version.content_hash.substring(0, 12) }}...
+                                </span>
+                                <Link v-if="!compareMode" :href="`/queue/version/${version.id}`" @click.stop>
+                                    <Button variant="ghost" size="sm">
+                                        <ArrowRight class="h-4 w-4" />
+                                    </Button>
+                                </Link>
+                            </div>
                         </div>
                     </div>
                 </CardContent>

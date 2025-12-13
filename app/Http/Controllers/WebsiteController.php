@@ -2,7 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\AnalyzeDocumentVersionJob;
 use App\Jobs\DiscoverPoliciesJob;
+use App\Models\AnalysisJob;
 use App\Models\Company;
 use App\Models\DiscoveryJob;
 use App\Models\Website;
@@ -105,5 +107,61 @@ class WebsiteController extends Controller
             'error_message' => $latestJob?->error_message,
             'completed_at' => $latestJob?->completed_at?->toISOString(),
         ]);
+    }
+
+    /**
+     * Create AI analysis jobs for all "Ready to Analyze" documents in this website.
+     */
+    public function analyzeAll(Website $website): RedirectResponse
+    {
+        $jobsCreated = 0;
+
+        // Get all documents for this website that have a current version but no analysis
+        $documents = $website->documents()
+            ->whereHas('currentVersion')
+            ->with('currentVersion')
+            ->get();
+
+        foreach ($documents as $document) {
+            $currentVersion = $document->currentVersion;
+
+            if (!$currentVersion) {
+                continue;
+            }
+
+            // Check if already has an analysis
+            $hasAnalysis = $currentVersion->currentAnalysis !== null;
+            if ($hasAnalysis) {
+                continue;
+            }
+
+            // Check if there's already a pending/running analysis job
+            $pendingJob = AnalysisJob::where('document_version_id', $currentVersion->id)
+                ->whereIn('status', ['pending', 'running'])
+                ->where('created_at', '>', now()->subMinutes(10))
+                ->exists();
+
+            if ($pendingJob) {
+                continue;
+            }
+
+            // Create analysis job
+            $analysisJob = AnalysisJob::create([
+                'document_version_id' => $currentVersion->id,
+                'analysis_type' => 'full_analysis',
+                'status' => 'pending',
+            ]);
+
+            // Dispatch the job
+            AnalyzeDocumentVersionJob::dispatch($currentVersion, 'full_analysis', $analysisJob->id);
+
+            $jobsCreated++;
+        }
+
+        if ($jobsCreated === 0) {
+            return redirect()->back()->with('info', 'No documents ready for analysis.');
+        }
+
+        return redirect()->back()->with('success', "Started AI analysis for {$jobsCreated} document(s).");
     }
 }

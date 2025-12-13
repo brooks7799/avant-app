@@ -131,6 +131,7 @@ class CompanyController extends Controller
                     'version_count' => $document ? ($document->versions_count ?? $document->versions()->count()) : 0,
                     'overall_score' => $analysis?->overall_score,
                     'overall_rating' => $analysis?->overall_rating,
+                    'tags' => $analysis?->tags ?? [],
                     'products' => $document?->products->map(fn ($p) => [
                         'id' => $p->id,
                         'name' => $p->name,
@@ -166,6 +167,7 @@ class CompanyController extends Controller
                     'version_count' => $document->versions_count ?? $document->versions()->count(),
                     'overall_score' => $analysis?->overall_score,
                     'overall_rating' => $analysis?->overall_rating,
+                    'tags' => $analysis?->tags ?? [],
                     'products' => $document->products->map(fn ($p) => [
                         'id' => $p->id,
                         'name' => $p->name,
@@ -398,14 +400,26 @@ class CompanyController extends Controller
                 'document_type' => $document->documentType?->name,
                 'scrape_status' => $document->scrape_status,
                 'last_scraped_at' => $document->last_scraped_at?->toISOString(),
-                'versions' => $document->versions->map(fn ($v) => [
-                    'id' => $v->id,
-                    'version_number' => $v->version_number,
-                    'scraped_at' => $v->scraped_at?->toISOString(),
-                    'word_count' => $v->word_count,
-                    'is_current' => $v->is_current,
-                    'content_hash' => substr($v->content_hash, 0, 12),
-                ]),
+                'versions' => $document->versions->map(function ($v) {
+                    $analysis = $v->currentAnalysis;
+                    return [
+                        'id' => $v->id,
+                        'version_number' => $v->version_number,
+                        'scraped_at' => $v->scraped_at?->toISOString(),
+                        'word_count' => $v->word_count,
+                        'is_current' => $v->is_current,
+                        'content_hash' => substr($v->content_hash, 0, 12),
+                        'analysis' => $analysis ? [
+                            'id' => $analysis->id,
+                            'overall_score' => (float) $analysis->overall_score,
+                            'overall_rating' => $analysis->overall_rating,
+                            'summary' => $analysis->summary,
+                            'tags' => $analysis->tags ?? [],
+                            'model_used' => $analysis->model_used,
+                            'created_at' => $analysis->created_at->toISOString(),
+                        ] : null,
+                    ];
+                }),
             ] : null,
         ]);
     }

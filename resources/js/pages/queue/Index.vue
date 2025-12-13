@@ -37,7 +37,7 @@ import {
     DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog';
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 
 interface ScrapeJob {
     id: number;
@@ -124,6 +124,65 @@ const isRefreshing = ref(false);
 const isWorkerActionPending = ref(false);
 const activeTab = ref<'scrape' | 'discovery' | 'analysis'>('scrape');
 const displayUptime = ref(props.workerStatus.uptime);
+
+// Filter state
+const statusFilter = ref<'all' | 'completed' | 'failed' | 'pending' | 'running'>('all');
+const timeFilter = ref<'all' | 'today' | 'week'>('all');
+
+// Helper to check if a date is today
+function isToday(dateString: string): boolean {
+    const date = new Date(dateString);
+    const today = new Date();
+    return date.toDateString() === today.toDateString();
+}
+
+// Helper to check if a date is within the last week
+function isThisWeek(dateString: string): boolean {
+    const date = new Date(dateString);
+    const now = new Date();
+    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    return date >= weekAgo;
+}
+
+// Generic filter function
+function filterJobs<T extends { status: string; created_at: string }>(jobs: T[]): T[] {
+    return jobs.filter(job => {
+        // Status filter
+        if (statusFilter.value !== 'all' && job.status !== statusFilter.value) {
+            return false;
+        }
+        // Time filter
+        if (timeFilter.value === 'today' && !isToday(job.created_at)) {
+            return false;
+        }
+        if (timeFilter.value === 'week' && !isThisWeek(job.created_at)) {
+            return false;
+        }
+        return true;
+    });
+}
+
+// Filtered job lists
+const filteredScrapeJobs = computed(() => filterJobs(props.recentScrapeJobs));
+const filteredDiscoveryJobs = computed(() => filterJobs(props.recentDiscoveryJobs));
+const filteredAnalysisJobs = computed(() => filterJobs(props.recentAnalysisJobs));
+
+// Get counts for filter badges
+const getStatusCounts = computed(() => {
+    const jobs = activeTab.value === 'scrape'
+        ? props.recentScrapeJobs
+        : activeTab.value === 'discovery'
+            ? props.recentDiscoveryJobs
+            : props.recentAnalysisJobs;
+
+    return {
+        all: jobs.length,
+        completed: jobs.filter(j => j.status === 'completed').length,
+        failed: jobs.filter(j => j.status === 'failed').length,
+        pending: jobs.filter(j => j.status === 'pending').length,
+        running: jobs.filter(j => j.status === 'running').length,
+    };
+});
 
 const breadcrumbs: BreadcrumbItem[] = [
     { title: 'Dashboard', href: '/dashboard' },
@@ -623,19 +682,87 @@ function formatRelativeTime(dateString: string): string {
                 </button>
             </div>
 
+            <!-- Filter Bar -->
+            <div class="flex flex-wrap items-center gap-3">
+                <div class="flex items-center gap-2">
+                    <span class="text-sm text-muted-foreground">Status:</span>
+                    <div class="flex gap-1">
+                        <Button
+                            v-for="status in ['all', 'completed', 'failed', 'pending', 'running'] as const"
+                            :key="status"
+                            :variant="statusFilter === status ? 'default' : 'outline'"
+                            size="sm"
+                            @click="statusFilter = status"
+                            class="h-7 text-xs"
+                        >
+                            {{ status === 'all' ? 'All' : status.charAt(0).toUpperCase() + status.slice(1) }}
+                            <span
+                                v-if="getStatusCounts[status] > 0"
+                                class="ml-1 opacity-70"
+                            >
+                                ({{ getStatusCounts[status] }})
+                            </span>
+                        </Button>
+                    </div>
+                </div>
+
+                <div class="h-4 w-px bg-border" />
+
+                <div class="flex items-center gap-2">
+                    <span class="text-sm text-muted-foreground">Time:</span>
+                    <div class="flex gap-1">
+                        <Button
+                            v-for="time in [
+                                { value: 'all', label: 'All Time' },
+                                { value: 'today', label: 'Today' },
+                                { value: 'week', label: 'This Week' },
+                            ] as const"
+                            :key="time.value"
+                            :variant="timeFilter === time.value ? 'default' : 'outline'"
+                            size="sm"
+                            @click="timeFilter = time.value"
+                            class="h-7 text-xs"
+                        >
+                            {{ time.label }}
+                        </Button>
+                    </div>
+                </div>
+
+                <div
+                    v-if="statusFilter !== 'all' || timeFilter !== 'all'"
+                    class="ml-auto"
+                >
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        @click="statusFilter = 'all'; timeFilter = 'all'"
+                        class="h-7 text-xs text-muted-foreground"
+                    >
+                        Clear filters
+                    </Button>
+                </div>
+            </div>
+
             <!-- Recent Retrieval Jobs -->
             <Card v-if="activeTab === 'scrape'">
                 <CardHeader>
                     <CardTitle>Recent Retrieval Jobs</CardTitle>
-                    <CardDescription>Last 50 document retrieval jobs</CardDescription>
+                    <CardDescription>
+                        Showing {{ filteredScrapeJobs.length }} of {{ recentScrapeJobs.length }} jobs
+                    </CardDescription>
                 </CardHeader>
                 <CardContent>
-                    <div v-if="recentScrapeJobs.length === 0" class="py-8 text-center text-muted-foreground">
-                        No retrieval jobs yet.
+                    <div v-if="filteredScrapeJobs.length === 0" class="py-8 text-center text-muted-foreground">
+                        <template v-if="recentScrapeJobs.length === 0">
+                            No retrieval jobs yet.
+                        </template>
+                        <template v-else>
+                            No jobs match the current filters.
+                        </template>
                     </div>
                     <div v-else class="space-y-2">
                         <Link
-                            v-for="job in recentScrapeJobs"
+                            v-for="job in filteredScrapeJobs"
                             :key="job.id"
                             :href="`/queue/scrape/${job.id}`"
                             class="flex items-center justify-between rounded-lg border p-3 hover:bg-muted/50 transition-colors cursor-pointer"
@@ -688,15 +815,22 @@ function formatRelativeTime(dateString: string): string {
             <Card v-if="activeTab === 'discovery'">
                 <CardHeader>
                     <CardTitle>Recent Discovery Jobs</CardTitle>
-                    <CardDescription>Last 50 policy discovery jobs</CardDescription>
+                    <CardDescription>
+                        Showing {{ filteredDiscoveryJobs.length }} of {{ recentDiscoveryJobs.length }} jobs
+                    </CardDescription>
                 </CardHeader>
                 <CardContent>
-                    <div v-if="recentDiscoveryJobs.length === 0" class="py-8 text-center text-muted-foreground">
-                        No discovery jobs yet.
+                    <div v-if="filteredDiscoveryJobs.length === 0" class="py-8 text-center text-muted-foreground">
+                        <template v-if="recentDiscoveryJobs.length === 0">
+                            No discovery jobs yet.
+                        </template>
+                        <template v-else>
+                            No jobs match the current filters.
+                        </template>
                     </div>
                     <div v-else class="space-y-2">
                         <Link
-                            v-for="job in recentDiscoveryJobs"
+                            v-for="job in filteredDiscoveryJobs"
                             :key="job.id"
                             :href="`/queue/discovery/${job.id}`"
                             class="flex items-center justify-between rounded-lg border p-3 hover:bg-muted/50 transition-colors cursor-pointer"
@@ -751,21 +885,26 @@ function formatRelativeTime(dateString: string): string {
                 <CardHeader>
                     <CardTitle>Recent AI Analysis Jobs</CardTitle>
                     <CardDescription>
-                        Last 50 AI analysis jobs
+                        Showing {{ filteredAnalysisJobs.length }} of {{ recentAnalysisJobs.length }} jobs
                         <span v-if="stats.ai_analyses_today > 0" class="ml-2">
                             ({{ stats.ai_analyses_today }} today, {{ stats.ai_analyses_total }} total)
                         </span>
                     </CardDescription>
                 </CardHeader>
                 <CardContent>
-                    <div v-if="recentAnalysisJobs.length === 0" class="py-8 text-center text-muted-foreground">
+                    <div v-if="filteredAnalysisJobs.length === 0" class="py-8 text-center text-muted-foreground">
                         <Brain class="h-12 w-12 mx-auto mb-4 opacity-50" />
-                        <p>No AI analysis jobs yet.</p>
-                        <p class="text-sm mt-2">Go to a document page and click "Analyze with AI" to start.</p>
+                        <template v-if="recentAnalysisJobs.length === 0">
+                            <p>No AI analysis jobs yet.</p>
+                            <p class="text-sm mt-2">Go to a document page and click "Analyze with AI" to start.</p>
+                        </template>
+                        <template v-else>
+                            <p>No jobs match the current filters.</p>
+                        </template>
                     </div>
                     <div v-else class="space-y-2">
                         <Link
-                            v-for="job in recentAnalysisJobs"
+                            v-for="job in filteredAnalysisJobs"
                             :key="job.id"
                             :href="job.document_id ? `/documents/${job.document_id}` : '#'"
                             class="flex items-center justify-between rounded-lg border p-3 hover:bg-muted/50 transition-colors cursor-pointer"
