@@ -4,6 +4,8 @@ namespace App\Services\AI;
 
 use App\Models\DocumentVersion;
 use App\Models\VersionComparison;
+use App\Models\VersionComparisonAnalysis;
+use App\Models\VersionComparisonChunkSummary;
 use App\Services\LLM\LlmClientInterface;
 use App\Services\LLM\LlmResponse;
 use Illuminate\Support\Facades\Log;
@@ -28,10 +30,230 @@ PROMPT;
     public function __construct(
         protected LlmClientInterface $llmClient,
         protected SuspiciousTimingService $timingService,
+        protected VersionDiffService $diffService,
     ) {}
 
     /**
+     * Analyze the diff and store results in a VersionComparisonAnalysis record.
+     * This supports multiple analyses per comparison.
+     */
+    public function analyzeForHistory(VersionComparison $comparison, VersionComparisonAnalysis $analysisRecord): array
+    {
+        $this->totalInputTokens = 0;
+        $this->totalOutputTokens = 0;
+
+        $oldVersion = $comparison->oldVersion;
+        $newVersion = $comparison->newVersion;
+
+        if (! $oldVersion || ! $newVersion) {
+            throw new \RuntimeException('Comparison is missing version references');
+        }
+
+        Log::info('Starting diff analysis for history', [
+            'analysis_id' => $analysisRecord->id,
+            'comparison_id' => $comparison->id,
+        ]);
+
+        // Generate the diff to get blocks for chunk analysis
+        $diff = $this->diffService->generateDiff(
+            $oldVersion->content_markdown ?? $oldVersion->content_text,
+            $newVersion->content_markdown ?? $newVersion->content_text
+        );
+
+        // Identify change chunks (blocks that are added or removed)
+        $changeChunks = $this->identifyChangeChunks($diff['blocks'] ?? []);
+        $totalChunks = count($changeChunks);
+
+        // Update analysis with total chunk count
+        $analysisRecord->update([
+            'total_chunks' => $totalChunks,
+            'processed_chunks' => 0,
+            'current_chunk_label' => 'Analyzing overall changes...',
+        ]);
+
+        // Get the existing structured changes
+        $structuredChanges = $comparison->changes ?? [];
+
+        // Analyze changes with AI (overall summary)
+        $analysis = $this->analyzeChanges($oldVersion, $newVersion, $structuredChanges);
+
+        // Calculate impact score delta
+        $impactDelta = $this->calculateImpactDelta($analysis['change_flags'] ?? []);
+
+        // Analyze timing
+        $timingAnalysis = $this->timingService->evaluate($newVersion, $impactDelta);
+
+        // Now process each chunk sequentially
+        Log::info('Starting chunk-by-chunk analysis', [
+            'analysis_id' => $analysisRecord->id,
+            'total_chunks' => $totalChunks,
+        ]);
+
+        foreach ($changeChunks as $index => $chunk) {
+            $chunkNumber = $index + 1;
+            $chunkLabel = "Analyzing change {$chunkNumber} of {$totalChunks}...";
+
+            $analysisRecord->updateProgress($index, $chunkLabel);
+
+            try {
+                $this->analyzeAndStoreChunk($comparison, $chunk, $index);
+            } catch (\Exception $e) {
+                Log::warning('Chunk analysis failed, continuing with next', [
+                    'chunk_index' => $index,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // Update the analysis record as completed
+        $analysisRecord->markAsCompleted([
+            'summary' => $analysis['summary'] ?? null,
+            'impact_analysis' => $analysis['impact_analysis'] ?? null,
+            'impact_score_delta' => $impactDelta,
+            'change_flags' => $analysis['change_flags'] ?? [],
+            'is_suspicious_timing' => $timingAnalysis['is_suspicious'],
+            'suspicious_timing_score' => $timingAnalysis['score'],
+            'timing_context' => $timingAnalysis['context'],
+            'ai_model_used' => $this->llmClient->getModel(),
+            'ai_tokens_used' => $this->totalInputTokens + $this->totalOutputTokens,
+            'ai_analysis_cost' => $this->estimateCost(),
+            'total_chunks' => $totalChunks,
+            'processed_chunks' => $totalChunks,
+            'current_chunk_label' => null,
+        ]);
+
+        // Also mark the comparison as analyzed (for backward compatibility)
+        if (! $comparison->is_analyzed) {
+            $comparison->update(['is_analyzed' => true]);
+        }
+
+        Log::info('Diff analysis for history completed', [
+            'analysis_id' => $analysisRecord->id,
+            'comparison_id' => $comparison->id,
+            'impact_delta' => $impactDelta,
+            'chunks_processed' => $totalChunks,
+        ]);
+
+        return [
+            'impact_score_delta' => $impactDelta,
+            'is_suspicious_timing' => $timingAnalysis['is_suspicious'],
+        ];
+    }
+
+    /**
+     * Identify change chunks from diff blocks.
+     * Returns array of chunks with their block indices and content.
+     */
+    protected function identifyChangeChunks(array $blocks): array
+    {
+        $chunks = [];
+        $currentChunk = null;
+
+        foreach ($blocks as $blockIndex => $block) {
+            $type = $block['type'] ?? 'unchanged';
+
+            if ($type === 'added' || $type === 'removed') {
+                if ($currentChunk === null) {
+                    $currentChunk = [
+                        'blockIndices' => [$blockIndex],
+                        'blocks' => [$block],
+                        'startLine' => $block['startNewLine'] ?? $block['startOldLine'] ?? null,
+                    ];
+                } else {
+                    // Add to current chunk if it's adjacent
+                    $currentChunk['blockIndices'][] = $blockIndex;
+                    $currentChunk['blocks'][] = $block;
+                }
+            } else {
+                // End of change chunk
+                if ($currentChunk !== null) {
+                    $chunks[] = $currentChunk;
+                    $currentChunk = null;
+                }
+            }
+        }
+
+        // Don't forget the last chunk
+        if ($currentChunk !== null) {
+            $chunks[] = $currentChunk;
+        }
+
+        return $chunks;
+    }
+
+    /**
+     * Analyze a single chunk and store the result.
+     */
+    protected function analyzeAndStoreChunk(VersionComparison $comparison, array $chunk, int $chunkIndex): void
+    {
+        // Extract text from the chunk
+        $removedText = '';
+        $addedText = '';
+
+        foreach ($chunk['blocks'] as $block) {
+            $lines = array_map(fn($line) => $line['content'] ?? '', $block['lines'] ?? []);
+            $text = implode("\n", $lines);
+
+            if ($block['type'] === 'removed') {
+                $removedText .= $text . "\n";
+            } elseif ($block['type'] === 'added') {
+                $addedText .= $text . "\n";
+            }
+        }
+
+        $removedText = trim($removedText);
+        $addedText = trim($addedText);
+
+        // Skip if both are empty
+        if (empty($removedText) && empty($addedText)) {
+            return;
+        }
+
+        // Generate content hash for deduplication
+        $contentHash = VersionComparisonChunkSummary::generateContentHash($removedText, $addedText);
+
+        // Check if we already have this chunk analyzed for this comparison
+        $existing = VersionComparisonChunkSummary::where('version_comparison_id', $comparison->id)
+            ->where('chunk_index', $chunkIndex)
+            ->first();
+
+        if ($existing) {
+            Log::info('Chunk already analyzed, skipping', ['chunk_index' => $chunkIndex]);
+            return;
+        }
+
+        // Call AI to analyze this chunk
+        $result = $this->diffService->generateChunkSummary($removedText, $addedText);
+
+        if (!$result['success'] || !$result['data']) {
+            Log::warning('Chunk analysis returned no data', ['chunk_index' => $chunkIndex]);
+            return;
+        }
+
+        $data = $result['data'];
+
+        // Store the chunk summary
+        VersionComparisonChunkSummary::create([
+            'version_comparison_id' => $comparison->id,
+            'chunk_index' => $chunkIndex,
+            'content_hash' => $contentHash,
+            'title' => $data['title'] ?? null,
+            'summary' => $data['summary'] ?? null,
+            'impact' => $data['impact'] ?? 'neutral',
+            'grade' => $data['grade'] ?? null,
+            'reason' => $data['reason'] ?? null,
+            'ai_model_used' => $this->llmClient->getModel(),
+        ]);
+
+        Log::info('Chunk summary stored', [
+            'chunk_index' => $chunkIndex,
+            'title' => $data['title'] ?? 'unknown',
+        ]);
+    }
+
+    /**
      * Analyze the diff between two document versions.
+     * @deprecated Use analyzeForHistory instead
      */
     public function analyzeDiff(VersionComparison $comparison): VersionComparison
     {
@@ -170,7 +392,7 @@ PROMPT;
                 ['role' => 'user', 'content' => $prompt],
             ], [
                 'temperature' => 0.2,
-                'max_tokens' => 2048,
+                'max_tokens' => 8000, // Increased for reasoning models that use tokens for internal chain-of-thought
             ]);
 
             $this->trackTokens($response);

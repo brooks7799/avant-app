@@ -313,14 +313,14 @@ PROMPT;
 
         try {
             $response = $this->llmClient->complete([
-                ['role' => 'system', 'content' => 'You are an expert legal analyst. Analyze legal document changes and explain them in plain language.'],
+                ['role' => 'system', 'content' => 'You are an expert legal analyst. Analyze legal document changes and explain them in plain language. Always respond with valid JSON only, no markdown.'],
                 ['role' => 'user', 'content' => $prompt],
             ], [
                 'temperature' => 0.3,
-                'max_tokens' => 4096,
+                'max_tokens' => 16000, // Increased for reasoning models that use tokens for internal chain-of-thought
             ]);
 
-            $result = $response->json();
+            $result = $this->parseJsonResponse($response->content);
 
             if (!is_array($result)) {
                 throw new \RuntimeException('Invalid response format');
@@ -346,5 +346,111 @@ PROMPT;
                 'newDate' => $newDate,
             ];
         }
+    }
+
+    /**
+     * Generate a summary for a specific chunk of changes (for tooltips).
+     */
+    public function generateChunkSummary(string $removedText, string $addedText): array
+    {
+        $prompt = <<<PROMPT
+Analyze this specific change in a legal document and provide a brief assessment.
+
+REMOVED TEXT:
+{$removedText}
+
+ADDED TEXT:
+{$addedText}
+
+Return a JSON response with:
+{
+  "title": "2-4 word title describing this change (e.g. 'Date Updated', 'Terms Acceptance', 'Data Sharing Policy')",
+  "summary": "1-2 sentence plain language summary of what changed",
+  "impact": "positive" | "negative" | "neutral",
+  "grade": "A" | "B" | "C" | "D" | "F",
+  "reason": "Brief explanation of the grade"
+}
+PROMPT;
+
+        try {
+            $response = $this->llmClient->complete([
+                ['role' => 'system', 'content' => 'You are an expert legal analyst. Provide brief, clear assessments. Always respond with valid JSON only.'],
+                ['role' => 'user', 'content' => $prompt],
+            ], [
+                'temperature' => 0.3,
+                'max_tokens' => 2000, // Increased for reasoning models that use tokens for internal chain-of-thought
+            ]);
+
+            $result = $this->parseJsonResponse($response->content);
+
+            return [
+                'success' => true,
+                'data' => $result,
+            ];
+        } catch (\Exception $e) {
+            Log::error('Chunk summary generation failed', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return [
+                'success' => false,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Parse JSON response with error handling.
+     */
+    protected function parseJsonResponse(string $content): ?array
+    {
+        // Try to extract JSON from markdown code blocks if present
+        if (preg_match('/```(?:json)?\s*\n?(.*?)\n?```/s', $content, $matches)) {
+            $content = trim($matches[1]);
+        }
+
+        // Try standard JSON decode first
+        $decoded = json_decode($content, true);
+        if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+            return $decoded;
+        }
+
+        // Try to repair truncated JSON
+        $repaired = $this->repairTruncatedJson($content);
+        if ($repaired) {
+            return $repaired;
+        }
+
+        Log::error('Failed to parse JSON response', [
+            'json_error' => json_last_error_msg(),
+            'content_preview' => substr($content, 0, 500),
+        ]);
+
+        return null;
+    }
+
+    /**
+     * Attempt to repair truncated JSON.
+     */
+    protected function repairTruncatedJson(string $json): ?array
+    {
+        $openBraces = substr_count($json, '{') - substr_count($json, '}');
+        $openBrackets = substr_count($json, '[') - substr_count($json, ']');
+
+        if ($openBraces <= 0 && $openBrackets <= 0) {
+            return null;
+        }
+
+        $repaired = $json;
+        $repaired = preg_replace('/,?\s*"[^"]*$/', '', $repaired);
+        $repaired .= str_repeat(']', max(0, $openBrackets));
+        $repaired .= str_repeat('}', max(0, $openBraces));
+
+        $decoded = json_decode($repaired, true);
+        if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+            return $decoded;
+        }
+
+        return null;
     }
 }

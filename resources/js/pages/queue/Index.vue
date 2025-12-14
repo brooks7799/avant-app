@@ -85,9 +85,29 @@ interface AnalysisJob {
     created_at: string;
 }
 
+interface DiffAnalysisJob {
+    id: number;
+    comparison_id: number;
+    document_id: number | null;
+    document_type: string | null;
+    company_name: string | null;
+    old_version_id: number;
+    new_version_id: number;
+    status: string;
+    ai_model_used: string | null;
+    ai_tokens_used: number | null;
+    ai_analysis_cost: number | null;
+    impact_score_delta: number | null;
+    is_suspicious_timing: boolean;
+    error_message: string | null;
+    completed_at: string | null;
+    created_at: string;
+}
+
 interface Stats {
     pending_jobs: number;
     pending_analysis_jobs: number;
+    pending_diff_analysis_jobs: number;
     failed_jobs: number;
     total_documents: number;
     monitored_documents: number;
@@ -113,6 +133,7 @@ interface Props {
     recentScrapeJobs: ScrapeJob[];
     recentDiscoveryJobs: DiscoveryJob[];
     recentAnalysisJobs: AnalysisJob[];
+    recentDiffAnalysisJobs: DiffAnalysisJob[];
     workerStatus: WorkerStatus;
 }
 
@@ -166,6 +187,7 @@ function filterJobs<T extends { status: string; created_at: string }>(jobs: T[])
 const filteredScrapeJobs = computed(() => filterJobs(props.recentScrapeJobs));
 const filteredDiscoveryJobs = computed(() => filterJobs(props.recentDiscoveryJobs));
 const filteredAnalysisJobs = computed(() => filterJobs(props.recentAnalysisJobs));
+const filteredDiffAnalysisJobs = computed(() => filterJobs(props.recentDiffAnalysisJobs));
 
 // Get counts for filter badges
 const getStatusCounts = computed(() => {
@@ -676,8 +698,8 @@ function formatRelativeTime(dateString: string): string {
                 >
                     <Brain class="mr-2 inline h-4 w-4" />
                     AI Analysis
-                    <Badge v-if="stats.pending_analysis_jobs > 0" variant="secondary" class="ml-2">
-                        {{ stats.pending_analysis_jobs }}
+                    <Badge v-if="stats.pending_analysis_jobs + stats.pending_diff_analysis_jobs > 0" variant="secondary" class="ml-2">
+                        {{ stats.pending_analysis_jobs + stats.pending_diff_analysis_jobs }}
                     </Badge>
                 </button>
             </div>
@@ -937,6 +959,90 @@ function formatRelativeTime(dateString: string): string {
                                         <span v-if="job.tokens_used"> &middot; {{ job.tokens_used.toLocaleString() }} tokens</span>
                                         <span v-if="job.analysis_cost"> &middot; {{ formatCost(job.analysis_cost) }}</span>
                                         <span v-if="job.duration_ms"> &middot; {{ formatDuration(job.duration_ms) }}</span>
+                                    </div>
+                                    <div v-if="job.error_message" class="text-xs text-red-500 truncate max-w-md">
+                                        {{ job.error_message }}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <Badge :variant="getStatusBadgeVariant(job.status)">
+                                    {{ job.status }}
+                                </Badge>
+                                <span class="text-xs text-muted-foreground whitespace-nowrap">
+                                    {{ formatRelativeTime(job.created_at) }}
+                                </span>
+                                <Eye class="h-4 w-4 text-muted-foreground" />
+                            </div>
+                        </Link>
+                    </div>
+                </CardContent>
+            </Card>
+
+            <!-- Version Diff Analysis Jobs -->
+            <Card v-if="activeTab === 'analysis'" class="mt-4">
+                <CardHeader>
+                    <CardTitle>Version Comparison Analysis</CardTitle>
+                    <CardDescription>
+                        AI analysis of changes between document versions
+                        <span v-if="stats.pending_diff_analysis_jobs > 0" class="ml-2">
+                            ({{ stats.pending_diff_analysis_jobs }} pending)
+                        </span>
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <div v-if="filteredDiffAnalysisJobs.length === 0" class="py-8 text-center text-muted-foreground">
+                        <Brain class="h-12 w-12 mx-auto mb-4 opacity-50" />
+                        <template v-if="recentDiffAnalysisJobs.length === 0">
+                            <p>No version comparison analyses yet.</p>
+                            <p class="text-sm mt-2">Compare two versions of a document and click "Generate Analysis".</p>
+                        </template>
+                        <template v-else>
+                            <p>No jobs match the current filters.</p>
+                        </template>
+                    </div>
+                    <div v-else class="space-y-2">
+                        <Link
+                            v-for="job in filteredDiffAnalysisJobs"
+                            :key="job.id"
+                            :href="job.document_id ? `/documents/${job.document_id}/compare/${job.old_version_id}/${job.new_version_id}` : '#'"
+                            class="flex items-center justify-between rounded-lg border p-3 hover:bg-muted/50 transition-colors cursor-pointer"
+                        >
+                            <div class="flex items-center gap-3">
+                                <component
+                                    :is="getStatusIcon(job.status)"
+                                    class="h-5 w-5"
+                                    :class="[
+                                        getStatusColor(job.status),
+                                        job.status === 'processing' ? 'animate-spin' : ''
+                                    ]"
+                                />
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <span class="font-medium">{{ job.company_name || 'Unknown' }}</span>
+                                        <Badge variant="outline" class="text-xs">
+                                            {{ job.document_type || 'Document' }}
+                                        </Badge>
+                                        <Badge
+                                            v-if="job.status === 'completed' && job.ai_model_used"
+                                            variant="secondary"
+                                            class="text-xs"
+                                        >
+                                            {{ job.ai_model_used }}
+                                        </Badge>
+                                        <Badge
+                                            v-if="job.is_suspicious_timing"
+                                            variant="destructive"
+                                            class="text-xs"
+                                        >
+                                            Suspicious Timing
+                                        </Badge>
+                                    </div>
+                                    <div class="text-xs text-muted-foreground">
+                                        v{{ job.old_version_id }} → v{{ job.new_version_id }}
+                                        <span v-if="job.ai_tokens_used"> &middot; {{ job.ai_tokens_used.toLocaleString() }} tokens</span>
+                                        <span v-if="job.ai_analysis_cost"> &middot; {{ formatCost(job.ai_analysis_cost) }}</span>
+                                        <span v-if="job.impact_score_delta !== null"> &middot; Impact: {{ job.impact_score_delta > 0 ? '+' : '' }}{{ job.impact_score_delta }}</span>
                                     </div>
                                     <div v-if="job.error_message" class="text-xs text-red-500 truncate max-w-md">
                                         {{ job.error_message }}

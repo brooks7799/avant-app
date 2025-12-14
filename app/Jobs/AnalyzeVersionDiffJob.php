@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\VersionComparison;
+use App\Models\VersionComparisonAnalysis;
 use App\Services\AI\PolicyDiffAnalysisService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -17,14 +18,14 @@ class AnalyzeVersionDiffJob implements ShouldQueue
 
     public int $tries = 2;
 
-    public int $timeout = 180; // 3 minutes
+    public int $timeout = 1800; // 30 minutes for full analysis with many chunks
 
     public int $backoff = 60;
 
     public int $maxExceptions = 2;
 
     public function __construct(
-        public VersionComparison $comparison,
+        public VersionComparisonAnalysis $analysis,
     ) {
         $this->onQueue('ai');
     }
@@ -34,41 +35,51 @@ class AnalyzeVersionDiffJob implements ShouldQueue
      */
     public function retryUntil(): \DateTime
     {
-        return now()->addMinutes(10);
+        return now()->addMinutes(15);
     }
 
     public function handle(PolicyDiffAnalysisService $diffService): void
     {
-        // Skip if already analyzed
-        if ($this->comparison->is_analyzed) {
-            Log::info('Diff already analyzed, skipping', [
-                'comparison_id' => $this->comparison->id,
+        // Skip if already completed or failed
+        if ($this->analysis->isCompleted() || $this->analysis->isFailed()) {
+            Log::info('Analysis already processed, skipping', [
+                'analysis_id' => $this->analysis->id,
+                'status' => $this->analysis->status,
             ]);
 
             return;
         }
 
+        $comparison = $this->analysis->comparison;
+
         Log::info('Starting version diff analysis job', [
-            'comparison_id' => $this->comparison->id,
-            'old_version_id' => $this->comparison->old_version_id,
-            'new_version_id' => $this->comparison->new_version_id,
+            'analysis_id' => $this->analysis->id,
+            'comparison_id' => $comparison->id,
+            'old_version_id' => $comparison->old_version_id,
+            'new_version_id' => $comparison->new_version_id,
         ]);
 
+        $this->analysis->markAsProcessing();
+
         try {
-            $result = $diffService->analyzeDiff($this->comparison);
+            $result = $diffService->analyzeForHistory($comparison, $this->analysis);
 
             Log::info('Version diff analysis completed', [
-                'comparison_id' => $this->comparison->id,
-                'impact_delta' => $result->impact_score_delta,
-                'is_suspicious' => $result->is_suspicious_timing,
+                'analysis_id' => $this->analysis->id,
+                'comparison_id' => $comparison->id,
+                'impact_delta' => $result['impact_score_delta'] ?? null,
+                'is_suspicious' => $result['is_suspicious_timing'] ?? false,
             ]);
 
         } catch (\Exception $e) {
             Log::error('Version diff analysis failed', [
-                'comparison_id' => $this->comparison->id,
+                'analysis_id' => $this->analysis->id,
+                'comparison_id' => $comparison->id,
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
             ]);
+
+            $this->analysis->markAsFailed($e->getMessage());
 
             throw $e;
         }
@@ -77,9 +88,11 @@ class AnalyzeVersionDiffJob implements ShouldQueue
     public function failed(\Throwable $exception): void
     {
         Log::error('Version diff analysis job failed permanently', [
-            'comparison_id' => $this->comparison->id,
+            'analysis_id' => $this->analysis->id,
             'error' => $exception->getMessage(),
         ]);
+
+        $this->analysis->markAsFailed($exception->getMessage());
     }
 
     /**
@@ -89,8 +102,8 @@ class AnalyzeVersionDiffJob implements ShouldQueue
     {
         return [
             'diff-analyze',
-            'comparison:'.$this->comparison->id,
-            'document:'.$this->comparison->document_id,
+            'analysis:'.$this->analysis->id,
+            'comparison:'.$this->analysis->version_comparison_id,
         ];
     }
 }

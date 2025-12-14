@@ -14,6 +14,7 @@ use App\Models\DocumentType;
 use App\Models\DocumentVersion;
 use App\Models\ScrapeJob;
 use App\Models\VersionComparison;
+use App\Models\VersionComparisonAnalysis;
 use App\Models\Website;
 use App\Services\Scraper\VersioningService;
 use Illuminate\Http\JsonResponse;
@@ -100,18 +101,44 @@ class QueueController extends Controller
                 'created_at' => $job->created_at->toISOString(),
             ]);
 
+        // Get recent version comparison analysis jobs (diff analysis)
+        $recentDiffAnalysisJobs = VersionComparisonAnalysis::with(['comparison.document.company', 'comparison.document.documentType'])
+            ->orderByDesc('created_at')
+            ->limit(50)
+            ->get()
+            ->map(fn ($job) => [
+                'id' => $job->id,
+                'comparison_id' => $job->version_comparison_id,
+                'document_id' => $job->comparison?->document_id,
+                'document_type' => $job->comparison?->document?->documentType?->name,
+                'company_name' => $job->comparison?->document?->company?->name,
+                'old_version_id' => $job->comparison?->old_version_id,
+                'new_version_id' => $job->comparison?->new_version_id,
+                'status' => $job->status,
+                'ai_model_used' => $job->ai_model_used,
+                'ai_tokens_used' => $job->ai_tokens_used,
+                'ai_analysis_cost' => $job->ai_analysis_cost ? (float) $job->ai_analysis_cost : null,
+                'impact_score_delta' => $job->impact_score_delta,
+                'is_suspicious_timing' => $job->is_suspicious_timing,
+                'error_message' => $job->error_message,
+                'completed_at' => $job->completed_at?->toISOString(),
+                'created_at' => $job->created_at->toISOString(),
+            ]);
+
         // Count pending job records (not just queue table)
         $pendingScrapeJobRecords = ScrapeJob::whereIn('status', ['pending', 'running'])->count();
         $pendingDiscoveryJobRecords = DiscoveryJob::whereIn('status', ['pending', 'running'])->count();
         $pendingAnalysisJobRecords = AnalysisJob::whereIn('status', ['pending', 'running'])->count();
+        $pendingDiffAnalysisRecords = VersionComparisonAnalysis::whereIn('status', ['pending', 'processing'])->count();
 
         // Get statistics
         $stats = [
-            'pending_jobs' => $pendingJobs + $pendingScrapeJobRecords + $pendingDiscoveryJobRecords + $pendingAnalysisJobRecords,
+            'pending_jobs' => $pendingJobs + $pendingScrapeJobRecords + $pendingDiscoveryJobRecords + $pendingAnalysisJobRecords + $pendingDiffAnalysisRecords,
             'pending_queue_jobs' => $pendingJobs,
             'pending_scrape_jobs' => $pendingScrapeJobRecords,
             'pending_discovery_jobs' => $pendingDiscoveryJobRecords,
             'pending_analysis_jobs' => $pendingAnalysisJobRecords,
+            'pending_diff_analysis_jobs' => $pendingDiffAnalysisRecords,
             'failed_jobs' => $failedJobs,
             'total_documents' => Document::count(),
             'monitored_documents' => Document::where('is_monitored', true)->where('is_active', true)->count(),
@@ -152,6 +179,7 @@ class QueueController extends Controller
             'recentScrapeJobs' => $recentScrapeJobs,
             'recentDiscoveryJobs' => $recentDiscoveryJobs,
             'recentAnalysisJobs' => $recentAnalysisJobs,
+            'recentDiffAnalysisJobs' => $recentDiffAnalysisJobs,
             'workerStatus' => $workerStatus,
         ]);
     }
@@ -741,7 +769,7 @@ class QueueController extends Controller
         // Using escapeshellarg for paths with spaces
         // Process all queues: default, scraping, discovery, and ai
         $command = sprintf(
-            'nohup php %s queue:work --queue=default,scraping,discovery,ai --sleep=3 --tries=3 --max-time=3600 > %s 2>&1 & echo $!',
+            'nohup php %s queue:work --queue=default,scraping,discovery,ai --sleep=3 --tries=3 --timeout=1800 --max-time=3600 > %s 2>&1 & echo $!',
             escapeshellarg($artisan),
             escapeshellarg($logFile)
         );

@@ -80,7 +80,9 @@ Route::middleware(['auth', 'verified'])->group(function () {
 
     // Version comparison routes
     Route::get('documents/{document}/compare/{oldVersion}/{newVersion}', [VersionComparisonController::class, 'show'])->name('documents.compare');
-    Route::get('documents/{document}/compare/{oldVersion}/{newVersion}/summary', [VersionComparisonController::class, 'summary'])->name('documents.compare.summary');
+    Route::post('documents/{document}/compare/{oldVersion}/{newVersion}/analyze', [VersionComparisonController::class, 'summary'])->name('documents.compare.analyze');
+    Route::get('documents/{document}/compare/analysis/{analysis}/status', [VersionComparisonController::class, 'analysisStatus'])->name('documents.compare.analysis-status');
+    Route::post('documents/{document}/compare/chunk-summary', [VersionComparisonController::class, 'chunkSummary'])->name('documents.compare.chunk-summary');
 
     // Queue worker control routes
     Route::post('queue/worker/start', [QueueController::class, 'startWorker'])->name('queue.worker.start');

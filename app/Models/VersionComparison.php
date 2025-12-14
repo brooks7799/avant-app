@@ -5,6 +5,8 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class VersionComparison extends Model
 {
@@ -76,5 +78,27 @@ class VersionComparison extends Model
     public function getTotalChangesAttribute(): int
     {
         return $this->additions_count + $this->deletions_count + $this->modifications_count;
+    }
+
+    public function analyses(): HasMany
+    {
+        return $this->hasMany(VersionComparisonAnalysis::class)->orderByDesc('created_at');
+    }
+
+    public function chunkSummaries(): HasMany
+    {
+        return $this->hasMany(VersionComparisonChunkSummary::class)->orderBy('chunk_index');
+    }
+
+    public function latestAnalysis(): HasOne
+    {
+        return $this->hasOne(VersionComparisonAnalysis::class)->latestOfMany();
+    }
+
+    public function latestCompletedAnalysis(): HasOne
+    {
+        return $this->hasOne(VersionComparisonAnalysis::class)
+            ->where('status', 'completed')
+            ->latestOfMany();
     }
 }
