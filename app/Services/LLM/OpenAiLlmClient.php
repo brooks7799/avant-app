@@ -74,8 +74,8 @@ class OpenAiLlmClient extends AbstractLlmClient
             $payload['stop'] = $options['stop'];
         }
 
-        // OpenAI-specific: response format for JSON mode
-        if (isset($options['response_format'])) {
+        // OpenAI-specific: response format for JSON mode (not supported by all models)
+        if (isset($options['response_format']) && $this->supportsJsonResponseFormat()) {
             $payload['response_format'] = $options['response_format'];
         }
 
@@ -127,13 +127,63 @@ class OpenAiLlmClient extends AbstractLlmClient
         return false;
     }
 
+    /**
+     * Check if the model supports JSON response format.
+     * Some models may not support this feature.
+     */
+    protected function supportsJsonResponseFormat(): bool
+    {
+        $model = $this->model;
+
+        // Models that may not support response_format
+        $unsupportedModels = ['gpt-5-nano', 'o1', 'o3'];
+
+        foreach ($unsupportedModels as $prefix) {
+            if (str_starts_with($model, $prefix)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     protected function parseResponse(array $data, float $latencyMs): LlmResponse
     {
         $choice = $data['choices'][0] ?? [];
         $usage = $data['usage'] ?? [];
+        $message = $choice['message'] ?? [];
+
+        // Try different content locations (varies by model)
+        $content = $message['content'] ?? '';
+
+        // Some reasoning models (o1, o3, gpt-5-nano) may put content in different places
+        if (empty($content)) {
+            // Check for reasoning_content (o1/o3 style)
+            $content = $message['reasoning_content'] ?? '';
+        }
+        if (empty($content)) {
+            // Check for text field
+            $content = $message['text'] ?? '';
+        }
+
+        // Log warning if content is empty but we expected a response
+        if (empty($content) && !empty($data['choices'])) {
+            \Illuminate\Support\Facades\Log::warning('OpenAI returned empty content', [
+                'finish_reason' => $choice['finish_reason'] ?? 'unknown',
+                'model' => $data['model'] ?? $this->model,
+                'choice_keys' => array_keys($choice),
+                'message_keys' => array_keys($message),
+                'message_preview' => json_encode(array_map(
+                    fn($v) => is_string($v) ? substr($v, 0, 100) : $v,
+                    $message
+                )),
+                'refusal' => $message['refusal'] ?? null,
+                'output_tokens' => $usage['completion_tokens'] ?? 0,
+            ]);
+        }
 
         return new LlmResponse(
-            content: $choice['message']['content'] ?? '',
+            content: $content,
             model: $data['model'] ?? $this->model,
             inputTokens: $usage['prompt_tokens'] ?? null,
             outputTokens: $usage['completion_tokens'] ?? null,

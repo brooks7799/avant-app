@@ -105,6 +105,25 @@ PROMPT;
             }
         }
 
+        // Check if the analysis actually succeeded (not the fallback error message)
+        $analysisFailed = ($analysis['summary'] ?? '') === 'Analysis could not be completed.'
+            || empty($analysis['summary']);
+
+        if ($analysisFailed) {
+            $analysisRecord->markAsFailed('AI analysis failed to generate a valid summary. Please try again.');
+
+            Log::warning('Diff analysis marked as failed due to invalid summary', [
+                'analysis_id' => $analysisRecord->id,
+                'comparison_id' => $comparison->id,
+                'summary' => $analysis['summary'] ?? 'null',
+            ]);
+
+            return [
+                'impact_score_delta' => 0,
+                'is_suspicious_timing' => false,
+            ];
+        }
+
         // Update the analysis record as completed
         $analysisRecord->markAsCompleted([
             'summary' => $analysis['summary'] ?? null,
@@ -355,14 +374,29 @@ NEW VERSION (sample):
 <<<NEW_END>>>
 
 Analyze the changes and provide:
-1. A summary of what changed (2-3 paragraphs)
-2. Impact analysis - how these changes affect users (positive, negative, or neutral)
+1. A summary of what changed
+2. Impact analysis - how these changes affect users
 3. Specific change flags for notable additions, removals, or modifications
+
+CRITICAL FORMATTING REQUIREMENT:
+The "summary" and "impact_analysis" fields MUST use rich markdown formatting. DO NOT write plain paragraphs.
+
+Required format for summary and impact_analysis:
+- Start with a 1-sentence overview
+- Use ### Section Headers to organize by topic
+- Use bullet points (- ) for listing multiple changes
+- Use **bold text** for key terms, company names, and important phrases
+- Use emojis at the start of bullets: ⚠️ (warning/concern), ❌ (negative/removed), ✅ (positive), 📝 (neutral/info), 🔒 (privacy), ⚖️ (legal), 💰 (financial), 🕐 (timing)
+- Keep paragraphs SHORT (1-2 sentences max)
+- Never write walls of text
+
+Example of CORRECT formatting:
+"### 📋 Overview\n\nThis update makes **significant changes** to user rights and dispute resolution.\n\n### ⚠️ Key Concerns\n\n- ⚠️ **Mandatory arbitration** now required for all disputes\n- ❌ **Class action rights** have been removed\n- 🔒 Data retention extended from **30 days to 1 year**\n\n### ✅ Improvements\n\n- ✅ Added **clearer language** about data collection\n- ✅ New **opt-out mechanism** for marketing emails"
 
 Return JSON:
 {
-  "summary": "Plain English summary of what changed...",
-  "impact_analysis": "Analysis of how changes impact users...",
+  "summary": "### 📋 Overview\n\n[formatted content with headers, bullets, bold, emojis]...",
+  "impact_analysis": "### ⚖️ User Impact\n\n[formatted content]...",
   "change_flags": {
     "new_clauses": [
       { "type": "forced_arbitration", "description": "Added mandatory arbitration clause", "severity": 10 }
@@ -386,20 +420,48 @@ Change types to look for:
 - Neutral: clarification, formatting, typo_fix, reordering
 PROMPT;
 
+        $response = null;
         try {
             $response = $this->llmClient->complete([
                 ['role' => 'system', 'content' => self::SYSTEM_PROMPT],
                 ['role' => 'user', 'content' => $prompt],
             ], [
                 'temperature' => 0.2,
-                'max_tokens' => 8000, // Increased for reasoning models that use tokens for internal chain-of-thought
+                'max_tokens' => 16000, // Increased to avoid truncation
+                'response_format' => ['type' => 'json_object'],
             ]);
+
+            // Check for truncation which can cause JSON parsing failures
+            if ($response->wasTruncated()) {
+                Log::warning('LLM response was truncated', [
+                    'output_tokens' => $response->outputTokens,
+                    'finish_reason' => $response->finishReason,
+                ]);
+            }
 
             $this->trackTokens($response);
 
-            return $response->json();
+            $result = $response->json();
+
+            // Post-process: ensure summary and impact_analysis have rich formatting
+            // If the model returned plain text, format it
+            if (!empty($result['summary']) && !str_contains($result['summary'], '###') && !str_contains($result['summary'], '**')) {
+                $result['summary'] = $this->formatAsRichMarkdown($result['summary'], 'summary');
+            }
+            if (!empty($result['impact_analysis']) && !str_contains($result['impact_analysis'], '###') && !str_contains($result['impact_analysis'], '**')) {
+                $result['impact_analysis'] = $this->formatAsRichMarkdown($result['impact_analysis'], 'impact');
+            }
+
+            return $result;
         } catch (\Exception $e) {
-            Log::error('Diff analysis failed', ['error' => $e->getMessage()]);
+            Log::error('Diff analysis failed', [
+                'error' => $e->getMessage(),
+                'content_length' => $response ? strlen($response->content) : 0,
+                'content_preview' => $response ? substr($response->content, 0, 500) : 'No response',
+                'finish_reason' => $response?->finishReason ?? 'unknown',
+                'output_tokens' => $response?->outputTokens ?? 0,
+                'was_truncated' => $response?->wasTruncated() ?? false,
+            ]);
 
             return [
                 'summary' => 'Analysis could not be completed.',
@@ -529,5 +591,84 @@ PROMPT;
         $outputCost = ($this->totalOutputTokens / 1_000_000) * ($modelPricing['output'] ?? 0);
 
         return $inputCost + $outputCost;
+    }
+
+    /**
+     * Format plain text analysis as rich markdown using AI.
+     */
+    protected function formatAsRichMarkdown(string $plainText, string $type): string
+    {
+        $typeLabel = $type === 'summary' ? 'Executive Summary' : 'Impact Analysis';
+        $headerEmoji = $type === 'summary' ? '📋' : '⚖️';
+
+        $prompt = <<<PROMPT
+Transform this plain text into a DETAILED, richly formatted markdown document. EXPAND the content to be more comprehensive and detailed.
+
+Original text:
+{$plainText}
+
+YOUR TASK: Create a well-structured, visually rich markdown document that is AT LEAST 3x longer than the input.
+
+REQUIRED FORMAT:
+
+### {$headerEmoji} {$typeLabel}
+
+[One sentence hook that grabs attention]
+
+### ⚠️ Key Concerns
+
+- ⚠️ **[Concern 1 Title]** — [Detailed explanation of this concern and why it matters to users]
+- ❌ **[Concern 2 Title]** — [Detailed explanation]
+- 🔒 **[Privacy Concern]** — [Detailed explanation]
+
+### 📝 What Changed
+
+- 🕐 **[Change 1]** — [Details about timing, deadlines, or process changes]
+- ⚖️ **[Legal Change]** — [Details about legal implications]
+- 💰 **[Financial Impact]** — [Details if applicable]
+
+### ✅ Neutral or Positive Changes (if any)
+
+- ✅ **[Positive item]** — [Explanation]
+- 📝 **[Neutral item]** — [Explanation]
+
+### 🎯 Bottom Line
+
+[2-3 sentences summarizing the overall impact on users]
+
+FORMATTING RULES:
+1. EVERY bullet point MUST start with an emoji
+2. EVERY bullet point MUST have a **bold title** followed by an em dash (—) and explanation
+3. Each bullet explanation should be 1-2 full sentences, not fragments
+4. Use ### headers to create clear sections
+5. Be VERBOSE - explain WHY each change matters
+6. Aim for 300-500 words total
+7. Make it look like a professional ChatGPT response
+
+Return ONLY the formatted markdown. No code blocks, no JSON, no meta-commentary.
+PROMPT;
+
+        try {
+            $response = $this->llmClient->complete([
+                ['role' => 'user', 'content' => $prompt],
+            ], [
+                'temperature' => 0.3,
+                'max_tokens' => 2000,
+            ]);
+
+            $this->trackTokens($response);
+
+            $formatted = trim($response->content);
+
+            // Remove any markdown code block wrapper if present
+            if (preg_match('/^```(?:markdown)?\s*\n?(.*?)\n?```$/s', $formatted, $matches)) {
+                $formatted = trim($matches[1]);
+            }
+
+            return $formatted;
+        } catch (\Exception $e) {
+            Log::warning('Failed to format as rich markdown', ['error' => $e->getMessage()]);
+            return $plainText;
+        }
     }
 }

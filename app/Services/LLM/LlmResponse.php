@@ -59,6 +59,53 @@ class LlmResponse
             $content = trim($matches[1]);
         }
 
+        // First attempt: direct parse
+        $result = json_decode($content, true, 512);
+        if (json_last_error() === JSON_ERROR_NONE) {
+            return $result;
+        }
+
+        // Second attempt: fix common issues with LLM-generated JSON
+        // Fix unescaped newlines inside string values
+        $fixed = preg_replace_callback(
+            '/"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"/s',
+            function ($match) {
+                // Escape literal newlines inside strings
+                $str = str_replace(["\r\n", "\r", "\n"], ["\\r\\n", "\\r", "\\n"], $match[1]);
+                // Escape literal tabs
+                $str = str_replace("\t", "\\t", $str);
+                return '"' . $str . '"';
+            },
+            $content
+        );
+
+        $result = json_decode($fixed, true, 512);
+        if (json_last_error() === JSON_ERROR_NONE) {
+            return $result;
+        }
+
+        // Third attempt: try to find JSON object boundaries
+        if (preg_match('/\{[\s\S]*\}/s', $content, $jsonMatch)) {
+            $jsonContent = $jsonMatch[0];
+
+            // Apply the same fix
+            $fixed = preg_replace_callback(
+                '/"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"/s',
+                function ($match) {
+                    $str = str_replace(["\r\n", "\r", "\n"], ["\\r\\n", "\\r", "\\n"], $match[1]);
+                    $str = str_replace("\t", "\\t", $str);
+                    return '"' . $str . '"';
+                },
+                $jsonContent
+            );
+
+            $result = json_decode($fixed, true, 512);
+            if (json_last_error() === JSON_ERROR_NONE) {
+                return $result;
+            }
+        }
+
+        // If all attempts fail, throw with original error
         return json_decode($content, true, 512, JSON_THROW_ON_ERROR);
     }
 

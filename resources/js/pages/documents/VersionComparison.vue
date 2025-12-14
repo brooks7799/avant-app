@@ -47,6 +47,7 @@ import {
     SelectValue,
 } from '@/components/ui/select';
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
+import { marked } from 'marked';
 
 interface DiffLine {
     type: 'unchanged' | 'added' | 'removed';
@@ -117,6 +118,10 @@ interface AnalysisRecord {
     completed_at: string | null;
     created_at: string | null;
     error_message: string | null;
+    // Progress fields for pending/processing analyses
+    total_chunks: number | null;
+    processed_chunks: number | null;
+    current_chunk_label: string | null;
 }
 
 interface ChunkSummaryData {
@@ -190,6 +195,17 @@ const chunkSummaries = ref<Map<number, { loading: boolean; data: ChunkSummaryDat
 const hoveredItemIndex = ref<number | null>(null);
 const viewMode = ref<'inline' | 'side-by-side'>('inline');
 
+// Collapsible sections state - all collapsed by default
+const collapsedSections = ref<Set<string>>(new Set(['new_clauses', 'removed_clauses', 'modified_clauses', 'neutral_changes']));
+
+function toggleSection(section: string) {
+    if (collapsedSections.value.has(section)) {
+        collapsedSections.value.delete(section);
+    } else {
+        collapsedSections.value.add(section);
+    }
+}
+
 // Analysis state
 const analyses = ref<AnalysisRecord[]>(props.analyses || []);
 const selectedAnalysisId = ref<number | null>(null);
@@ -217,8 +233,42 @@ const completedAnalyses = computed(() => {
     return analyses.value.filter(a => a.status === 'completed');
 });
 
-// Initialize selected analysis to the latest completed one
+// Computed: Render summary as HTML from markdown
+const renderedSummary = computed(() => {
+    if (!selectedAnalysis.value?.summary) return '';
+    return marked(selectedAnalysis.value.summary) as string;
+});
+
+// Computed: Render impact analysis as HTML from markdown
+const renderedImpactAnalysis = computed(() => {
+    if (!selectedAnalysis.value?.impact_analysis) return '';
+    return marked(selectedAnalysis.value.impact_analysis) as string;
+});
+
+// Initialize: check for pending/processing analyses first, then fall back to completed
 onMounted(() => {
+    // Check if there's a pending or processing analysis - resume polling for it
+    const pendingOrProcessing = analyses.value.find(a => a.status === 'pending' || a.status === 'processing');
+    if (pendingOrProcessing) {
+        // Resume showing progress for this analysis
+        isLoadingSummary.value = true;
+        pendingAnalysisId.value = pendingOrProcessing.id;
+        loadingStep.value = 5; // Jump to "Generating summary" step
+
+        // Initialize progress from the analysis record
+        if (pendingOrProcessing.total_chunks !== null) {
+            analysisProgress.value = {
+                totalChunks: pendingOrProcessing.total_chunks,
+                processedChunks: pendingOrProcessing.processed_chunks ?? 0,
+                currentLabel: pendingOrProcessing.current_chunk_label,
+            };
+        }
+
+        startPolling(pendingOrProcessing.id);
+        return;
+    }
+
+    // Otherwise, select the latest completed analysis
     const latestCompleted = analyses.value.find(a => a.status === 'completed');
     if (latestCompleted) {
         selectedAnalysisId.value = latestCompleted.id;
@@ -777,7 +827,8 @@ function stopLoading() {
     <Head :title="`Compare Versions - ${document.document_type}`" />
 
     <AppLayout :breadcrumbs="breadcrumbs">
-        <div class="flex h-full flex-1 flex-col gap-6 p-4">
+        <div class="mx-auto w-full max-w-6xl px-4 py-6">
+        <div class="flex h-full flex-1 flex-col gap-6">
             <!-- Header -->
             <div class="flex items-start justify-between">
                 <div>
@@ -1055,78 +1106,134 @@ function stopLoading() {
                         </div>
 
                         <!-- Executive Summary -->
-                        <div class="rounded-lg bg-muted p-4">
-                            <h4 class="mb-2 font-semibold">Executive Summary</h4>
-                            <p class="text-sm whitespace-pre-wrap">{{ selectedAnalysis.summary }}</p>
+                        <div class="rounded-lg bg-muted p-5">
+                            <div
+                                class="prose dark:prose-invert max-w-none prose-headings:text-lg prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-3 prose-p:my-3 prose-p:leading-relaxed prose-ul:my-3 prose-li:my-1 prose-li:leading-relaxed prose-strong:text-foreground"
+                                v-html="renderedSummary"
+                            />
                         </div>
 
                         <!-- Impact Analysis -->
-                        <div v-if="selectedAnalysis.impact_analysis" class="rounded-lg border p-4">
-                            <h4 class="mb-2 font-semibold">Impact Analysis</h4>
-                            <p class="text-sm whitespace-pre-wrap">{{ selectedAnalysis.impact_analysis }}</p>
+                        <div v-if="selectedAnalysis.impact_analysis" class="rounded-lg border p-5">
+                            <div
+                                class="prose dark:prose-invert max-w-none prose-headings:text-lg prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-3 prose-p:my-3 prose-p:leading-relaxed prose-ul:my-3 prose-li:my-1 prose-li:leading-relaxed prose-strong:text-foreground"
+                                v-html="renderedImpactAnalysis"
+                            />
                         </div>
 
                         <!-- Change Flags - Negative -->
                         <div v-if="selectedAnalysis.change_flags?.new_clauses?.length" class="space-y-3">
-                            <h4 class="font-semibold text-red-700 dark:text-red-400">New Concerning Clauses</h4>
-                            <div
-                                v-for="(clause, index) in selectedAnalysis.change_flags.new_clauses"
-                                :key="`new-${index}`"
-                                class="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-950/30"
+                            <button
+                                class="flex w-full cursor-pointer items-center justify-between rounded-lg bg-red-100 px-3 py-2 text-left transition-colors hover:bg-red-200 dark:bg-red-950/50 dark:hover:bg-red-950/70"
+                                @click="toggleSection('new_clauses')"
                             >
-                                <div class="flex items-center justify-between">
-                                    <Badge variant="destructive" class="text-xs">{{ clause.type?.replace(/_/g, ' ') }}</Badge>
-                                    <span class="text-xs text-muted-foreground">Severity: {{ clause.severity }}/10</span>
+                                <h4 class="font-semibold text-red-700 dark:text-red-400">
+                                    New Concerning Clauses
+                                    <span class="ml-2 rounded-full bg-red-500 px-2 py-0.5 text-xs font-medium text-white">
+                                        {{ selectedAnalysis.change_flags.new_clauses.length }}
+                                    </span>
+                                </h4>
+                                <component :is="collapsedSections.has('new_clauses') ? ChevronDown : ChevronUp" class="h-4 w-4 text-red-700 dark:text-red-400" />
+                            </button>
+                            <template v-if="!collapsedSections.has('new_clauses')">
+                                <div
+                                    v-for="(clause, index) in selectedAnalysis.change_flags.new_clauses"
+                                    :key="`new-${index}`"
+                                    class="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-950/30"
+                                >
+                                    <div class="flex items-center justify-between">
+                                        <Badge variant="destructive" class="text-xs">{{ clause.type?.replace(/_/g, ' ') }}</Badge>
+                                        <span class="text-xs text-muted-foreground">Severity: {{ clause.severity }}/10</span>
+                                    </div>
+                                    <p class="mt-2 text-sm">{{ clause.description }}</p>
                                 </div>
-                                <p class="mt-2 text-sm">{{ clause.description }}</p>
-                            </div>
+                            </template>
                         </div>
 
                         <!-- Change Flags - Removed Good Clauses -->
                         <div v-if="selectedAnalysis.change_flags?.removed_clauses?.length" class="space-y-3">
-                            <h4 class="font-semibold text-orange-700 dark:text-orange-400">Removed Clauses</h4>
-                            <div
-                                v-for="(clause, index) in selectedAnalysis.change_flags.removed_clauses"
-                                :key="`removed-${index}`"
-                                class="rounded-lg border border-orange-200 bg-orange-50 p-3 dark:border-orange-800 dark:bg-orange-950/30"
+                            <button
+                                class="flex w-full cursor-pointer items-center justify-between rounded-lg bg-orange-100 px-3 py-2 text-left transition-colors hover:bg-orange-200 dark:bg-orange-950/50 dark:hover:bg-orange-950/70"
+                                @click="toggleSection('removed_clauses')"
                             >
-                                <div class="flex items-center justify-between">
-                                    <Badge variant="outline" class="border-orange-500 text-xs text-orange-700">{{ clause.type?.replace(/_/g, ' ') }}</Badge>
-                                    <span class="text-xs text-muted-foreground">Severity: {{ clause.severity }}/10</span>
+                                <h4 class="font-semibold text-orange-700 dark:text-orange-400">
+                                    Removed Clauses
+                                    <span class="ml-2 rounded-full bg-orange-500 px-2 py-0.5 text-xs font-medium text-white">
+                                        {{ selectedAnalysis.change_flags.removed_clauses.length }}
+                                    </span>
+                                </h4>
+                                <component :is="collapsedSections.has('removed_clauses') ? ChevronDown : ChevronUp" class="h-4 w-4 text-orange-700 dark:text-orange-400" />
+                            </button>
+                            <template v-if="!collapsedSections.has('removed_clauses')">
+                                <div
+                                    v-for="(clause, index) in selectedAnalysis.change_flags.removed_clauses"
+                                    :key="`removed-${index}`"
+                                    class="rounded-lg border border-orange-200 bg-orange-50 p-3 dark:border-orange-800 dark:bg-orange-950/30"
+                                >
+                                    <div class="flex items-center justify-between">
+                                        <Badge variant="outline" class="border-orange-500 text-xs text-orange-700">{{ clause.type?.replace(/_/g, ' ') }}</Badge>
+                                        <span class="text-xs text-muted-foreground">Severity: {{ clause.severity }}/10</span>
+                                    </div>
+                                    <p class="mt-2 text-sm">{{ clause.description }}</p>
                                 </div>
-                                <p class="mt-2 text-sm">{{ clause.description }}</p>
-                            </div>
+                            </template>
                         </div>
 
                         <!-- Change Flags - Modified -->
                         <div v-if="selectedAnalysis.change_flags?.modified_clauses?.length" class="space-y-3">
-                            <h4 class="font-semibold text-yellow-700 dark:text-yellow-400">Modified Clauses</h4>
-                            <div
-                                v-for="(clause, index) in selectedAnalysis.change_flags.modified_clauses"
-                                :key="`modified-${index}`"
-                                class="rounded-lg border border-yellow-200 bg-yellow-50 p-3 dark:border-yellow-800 dark:bg-yellow-950/30"
+                            <button
+                                class="flex w-full cursor-pointer items-center justify-between rounded-lg bg-yellow-100 px-3 py-2 text-left transition-colors hover:bg-yellow-200 dark:bg-yellow-950/50 dark:hover:bg-yellow-950/70"
+                                @click="toggleSection('modified_clauses')"
                             >
-                                <div class="flex items-center justify-between">
-                                    <Badge variant="outline" class="border-yellow-500 text-xs text-yellow-700">{{ clause.type?.replace(/_/g, ' ') }}</Badge>
-                                    <span class="text-xs text-muted-foreground">Severity: {{ clause.severity }}/10</span>
+                                <h4 class="font-semibold text-yellow-700 dark:text-yellow-400">
+                                    Modified Clauses
+                                    <span class="ml-2 rounded-full bg-yellow-500 px-2 py-0.5 text-xs font-medium text-white">
+                                        {{ selectedAnalysis.change_flags.modified_clauses.length }}
+                                    </span>
+                                </h4>
+                                <component :is="collapsedSections.has('modified_clauses') ? ChevronDown : ChevronUp" class="h-4 w-4 text-yellow-700 dark:text-yellow-400" />
+                            </button>
+                            <template v-if="!collapsedSections.has('modified_clauses')">
+                                <div
+                                    v-for="(clause, index) in selectedAnalysis.change_flags.modified_clauses"
+                                    :key="`modified-${index}`"
+                                    class="rounded-lg border border-yellow-200 bg-yellow-50 p-3 dark:border-yellow-800 dark:bg-yellow-950/30"
+                                >
+                                    <div class="flex items-center justify-between">
+                                        <Badge variant="outline" class="border-yellow-500 text-xs text-yellow-700">{{ clause.type?.replace(/_/g, ' ') }}</Badge>
+                                        <span class="text-xs text-muted-foreground">Severity: {{ clause.severity }}/10</span>
+                                    </div>
+                                    <p class="mt-2 text-sm">{{ clause.description }}</p>
                                 </div>
-                                <p class="mt-2 text-sm">{{ clause.description }}</p>
-                            </div>
+                            </template>
                         </div>
 
                         <!-- Change Flags - Neutral -->
                         <div v-if="selectedAnalysis.change_flags?.neutral_changes?.length" class="space-y-3">
-                            <h4 class="font-semibold text-gray-700 dark:text-gray-400">Neutral Changes</h4>
-                            <div
-                                v-for="(clause, index) in selectedAnalysis.change_flags.neutral_changes"
-                                :key="`neutral-${index}`"
-                                class="rounded-lg border bg-muted/50 p-3"
+                            <button
+                                class="flex w-full cursor-pointer items-center justify-between rounded-lg bg-gray-100 px-3 py-2 text-left transition-colors hover:bg-gray-200 dark:bg-gray-800/50 dark:hover:bg-gray-800/70"
+                                @click="toggleSection('neutral_changes')"
                             >
-                                <div class="flex items-center gap-2">
-                                    <Badge variant="outline" class="text-xs">{{ clause.type?.replace(/_/g, ' ') }}</Badge>
+                                <h4 class="font-semibold text-gray-700 dark:text-gray-400">
+                                    Neutral Changes
+                                    <span class="ml-2 rounded-full bg-gray-500 px-2 py-0.5 text-xs font-medium text-white">
+                                        {{ selectedAnalysis.change_flags.neutral_changes.length }}
+                                    </span>
+                                </h4>
+                                <component :is="collapsedSections.has('neutral_changes') ? ChevronDown : ChevronUp" class="h-4 w-4 text-gray-700 dark:text-gray-400" />
+                            </button>
+                            <template v-if="!collapsedSections.has('neutral_changes')">
+                                <div
+                                    v-for="(clause, index) in selectedAnalysis.change_flags.neutral_changes"
+                                    :key="`neutral-${index}`"
+                                    class="rounded-lg border bg-muted/50 p-3"
+                                >
+                                    <div class="flex items-center gap-2">
+                                        <Badge variant="outline" class="text-xs">{{ clause.type?.replace(/_/g, ' ') }}</Badge>
+                                    </div>
+                                    <p class="mt-2 text-sm">{{ clause.description }}</p>
                                 </div>
-                                <p class="mt-2 text-sm">{{ clause.description }}</p>
-                            </div>
+                            </template>
                         </div>
 
                         <!-- Suspicious Timing Details -->
@@ -1474,6 +1581,7 @@ function stopLoading() {
                     </div>
                 </CardContent>
             </Card>
+        </div>
         </div>
     </AppLayout>
 </template>

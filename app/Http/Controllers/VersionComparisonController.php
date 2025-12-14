@@ -51,8 +51,8 @@ class VersionComparisonController extends Controller
         // Format chunk summaries as a map (index => data) for frontend
         $chunkSummariesMap = $comparison->chunkSummaries->keyBy('chunk_index')->map(fn ($chunk) => $chunk->toFrontendArray());
 
-        // Format analyses for frontend
-        $analyses = $comparison->analyses->map(fn ($analysis) => [
+        // Format analyses for frontend (sorted by newest first)
+        $analyses = $comparison->analyses->sortByDesc('created_at')->values()->map(fn ($analysis) => [
             'id' => $analysis->id,
             'status' => $analysis->status,
             'summary' => $analysis->summary,
@@ -66,6 +66,10 @@ class VersionComparisonController extends Controller
             'completed_at' => $analysis->completed_at?->toISOString(),
             'created_at' => $analysis->created_at?->toISOString(),
             'error_message' => $analysis->error_message,
+            // Progress fields for pending/processing analyses
+            'total_chunks' => $analysis->total_chunks,
+            'processed_chunks' => $analysis->processed_chunks,
+            'current_chunk_label' => $analysis->current_chunk_label,
         ]);
 
         return Inertia::render('documents/VersionComparison', [
