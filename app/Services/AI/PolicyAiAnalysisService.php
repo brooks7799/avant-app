@@ -478,13 +478,29 @@ Analysis found:
 - {$greenCount} positive aspects (green flags)
 
 Provide:
-1. A 2-3 paragraph executive summary explaining what this document means for users
-2. 2-3 key recommendations for users
+1. An executive summary explaining what this document means for users
+2. Key recommendations for users
+
+CRITICAL FORMATTING REQUIREMENT:
+Both "summary" and "recommendations" MUST use rich markdown formatting. DO NOT write plain paragraphs.
+
+Required format:
+- Use bullet points (- ) for listing multiple items
+- Use **bold text** for key terms, company names, and important phrases
+- Use emojis at the start of bullets: ⚠️ (warning/concern), ❌ (negative), ✅ (positive), 📝 (neutral/info), 🔒 (privacy), ⚖️ (legal), 💰 (financial)
+- Keep paragraphs SHORT (1-2 sentences max)
+- For recommendations, use numbered list format with emojis
+
+Example of CORRECT summary formatting:
+"This {$documentType} from **{$companyName}** contains several provisions users should be aware of.\n\n- ⚠️ **Arbitration clause** — Disputes must go through binding arbitration\n- 🔒 **Data collection** — Extensive personal data is collected including location\n- ✅ **Deletion rights** — Users can request data deletion\n\nOverall, this policy has significant concerns around dispute resolution."
+
+Example of CORRECT recommendations formatting:
+"1. ⚠️ **Review the arbitration clause** — Consider opting out within 30 days if possible\n2. 🔒 **Check privacy settings** — Disable location tracking in account settings\n3. 📝 **Save a copy** — Download your data before agreeing to changes"
 
 Return JSON:
 {
-  "summary": "Your executive summary here...",
-  "recommendations": "Your recommendations here..."
+  "summary": "[Rich markdown with bullets, bold, emojis as shown above]",
+  "recommendations": "[Numbered list with emojis and bold as shown above]"
 }
 PROMPT;
 
@@ -500,7 +516,17 @@ PROMPT;
             $this->trackTokens($response);
             $this->rawAiOutputs[] = ['summary' => true, 'response' => $response->content];
 
-            return $response->json();
+            $result = $response->json();
+
+            // Post-process: ensure summary and recommendations have rich formatting
+            if (!empty($result['summary']) && !str_contains($result['summary'], '**') && !str_contains($result['summary'], '- ')) {
+                $result['summary'] = $this->formatAsRichMarkdown($result['summary'], 'summary');
+            }
+            if (!empty($result['recommendations']) && !str_contains($result['recommendations'], '**') && !str_contains($result['recommendations'], '1.')) {
+                $result['recommendations'] = $this->formatAsRichMarkdown($result['recommendations'], 'recommendations');
+            }
+
+            return $result;
         } catch (\Exception $e) {
             Log::error('Summary generation failed', ['error' => $e->getMessage()]);
 
@@ -508,6 +534,76 @@ PROMPT;
                 'summary' => implode(' ', array_slice($aggregated['summaries'], 0, 3)),
                 'recommendations' => null,
             ];
+        }
+    }
+
+    /**
+     * Format plain text as rich markdown using AI.
+     */
+    protected function formatAsRichMarkdown(string $plainText, string $type): string
+    {
+        $prompt = <<<PROMPT
+Transform this plain text into rich, scannable markdown. DO NOT change the meaning or add information.
+
+Plain text:
+{$plainText}
+
+Transform it using this EXACT format:
+- Use bullet points (- ) for listing multiple items
+- Use **bold** for key terms, company names, and important phrases
+- Use emojis at the start of bullets:
+  - ⚠️ for warnings/concerns
+  - ❌ for negative changes or removals
+  - ✅ for positive aspects
+  - 🔒 for privacy-related
+  - ⚖️ for legal/arbitration
+  - 💰 for financial
+  - 📝 for neutral info
+- Keep paragraphs to 1-2 sentences max
+- Make it visually scannable
+
+Return ONLY the formatted markdown, no JSON wrapper, no explanation.
+PROMPT;
+
+        if ($type === 'recommendations') {
+            $prompt = <<<PROMPT
+Transform these recommendations into a numbered list with rich formatting. DO NOT change the meaning.
+
+Plain text:
+{$plainText}
+
+Transform using this format:
+1. ⚠️ **Bold title** — Explanation of the recommendation
+2. 🔒 **Bold title** — Explanation of the recommendation
+3. 📝 **Bold title** — Explanation of the recommendation
+
+Use appropriate emojis (⚠️, 🔒, ⚖️, 💰, ✅, 📝) based on the topic.
+
+Return ONLY the formatted markdown, no JSON wrapper, no explanation.
+PROMPT;
+        }
+
+        try {
+            $response = $this->llmClient->complete([
+                ['role' => 'user', 'content' => $prompt],
+            ], [
+                'temperature' => 0.3,
+                'max_tokens' => 2000,
+            ]);
+
+            $this->trackTokens($response);
+
+            $formatted = trim($response->content);
+
+            // Remove any markdown code block wrapper if present
+            if (preg_match('/^```(?:markdown)?\s*\n?(.*?)\n?```$/s', $formatted, $matches)) {
+                $formatted = trim($matches[1]);
+            }
+
+            return $formatted;
+        } catch (\Exception $e) {
+            Log::warning('Failed to format as rich markdown', ['error' => $e->getMessage()]);
+            return $plainText;
         }
     }
 

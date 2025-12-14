@@ -9,6 +9,7 @@ use App\Models\AnalysisResult;
 use App\Models\Document;
 use App\Models\DocumentType;
 use App\Models\ScrapeJob;
+use App\Models\VersionComparison;
 use App\Models\Website;
 use App\Services\Scraper\VersioningService;
 use Illuminate\Http\RedirectResponse;
@@ -126,7 +127,68 @@ class DocumentController extends Controller
                 ->whereIn('status', ['pending', 'running'])
                 ->where('created_at', '>', now()->subMinutes(10))
                 ->first()?->only(['id', 'status', 'created_at', 'started_at', 'progress_log']) : null,
+            'latestVersionComparison' => $this->getLatestVersionComparison($document),
         ]);
+    }
+
+    /**
+     * Get the latest version comparison analysis for the document (current vs previous version).
+     */
+    protected function getLatestVersionComparison(Document $document): ?array
+    {
+        // Need at least 2 versions to have a comparison
+        if ($document->versions->count() < 2) {
+            return null;
+        }
+
+        $currentVersion = $document->currentVersion;
+        if (!$currentVersion) {
+            return null;
+        }
+
+        // Get the previous version (second in the list since they're ordered by scraped_at desc)
+        $previousVersion = $document->versions->skip(1)->first();
+        if (!$previousVersion) {
+            return null;
+        }
+
+        // Find the comparison between these two versions
+        $comparison = VersionComparison::where('document_id', $document->id)
+            ->where('old_version_id', $previousVersion->id)
+            ->where('new_version_id', $currentVersion->id)
+            ->with(['analyses' => fn($q) => $q->where('status', 'completed')->orderByDesc('completed_at')])
+            ->first();
+
+        if (!$comparison) {
+            return null;
+        }
+
+        // Get the latest completed analysis
+        $latestAnalysis = $comparison->analyses->first();
+        if (!$latestAnalysis) {
+            return null;
+        }
+
+        return [
+            'comparison_id' => $comparison->id,
+            'old_version_id' => $previousVersion->id,
+            'new_version_id' => $currentVersion->id,
+            'old_version_number' => $previousVersion->version_number,
+            'new_version_number' => $currentVersion->version_number,
+            'compare_url' => "/documents/{$document->id}/compare/{$previousVersion->id}/{$currentVersion->id}",
+            'analysis' => [
+                'id' => $latestAnalysis->id,
+                'status' => $latestAnalysis->status,
+                'summary' => $latestAnalysis->summary,
+                'impact_analysis' => $latestAnalysis->impact_analysis,
+                'impact_score_delta' => $latestAnalysis->impact_score_delta,
+                'change_flags' => $latestAnalysis->change_flags,
+                'is_suspicious_timing' => $latestAnalysis->is_suspicious_timing,
+                'suspicious_timing_score' => $latestAnalysis->suspicious_timing_score,
+                'timing_context' => $latestAnalysis->timing_context,
+                'completed_at' => $latestAnalysis->completed_at?->toISOString(),
+            ],
+        ];
     }
 
     public function store(Request $request, Website $website): RedirectResponse

@@ -189,6 +189,32 @@ interface PendingAnalysisJob {
     progress_log: Array<{ timestamp: string; message: string }> | null;
 }
 
+interface VersionComparisonAnalysis {
+    comparison_id: number;
+    old_version_id: number;
+    new_version_id: number;
+    old_version_number: number;
+    new_version_number: number;
+    compare_url: string;
+    analysis: {
+        id: number;
+        status: string;
+        summary: string | null;
+        impact_analysis: string | null;
+        impact_score_delta: number | null;
+        change_flags: {
+            new_clauses?: Array<{ type: string; severity: number; description: string }>;
+            removed_clauses?: Array<{ type: string; severity: number; description: string }>;
+            modified_clauses?: Array<{ type: string; severity: number; description: string }>;
+            neutral_changes?: Array<{ type: string; description: string }>;
+        } | null;
+        is_suspicious_timing: boolean;
+        suspicious_timing_score: number | null;
+        timing_context: any | null;
+        completed_at: string | null;
+    };
+}
+
 interface Props {
     document: DocumentData;
     currentVersion: Version | null;
@@ -198,6 +224,7 @@ interface Props {
     analysis: Analysis | null;
     analysisHistory: AnalysisHistoryItem[];
     pendingAnalysisJob: PendingAnalysisJob | null;
+    latestVersionComparison: VersionComparisonAnalysis | null;
 }
 
 const props = defineProps<Props>();
@@ -210,6 +237,7 @@ const expandedFaqIndex = ref<number | null>(null);
 const showAllFlags = ref(false);
 const showAnalysisHistory = ref(false);
 const showProcessingErrors = ref(false);
+const showLatestChangesDetails = ref(false);
 
 // Version comparison state
 const compareMode = ref(false);
@@ -389,6 +417,30 @@ const renderedMarkdown = computed(() => {
     return marked(props.currentVersion.content_markdown) as string;
 });
 
+// Render version comparison summary as HTML
+const renderedComparisonSummary = computed(() => {
+    if (!props.latestVersionComparison?.analysis?.summary) return '';
+    return marked(props.latestVersionComparison.analysis.summary) as string;
+});
+
+// Render version comparison impact analysis as HTML
+const renderedComparisonImpact = computed(() => {
+    if (!props.latestVersionComparison?.analysis?.impact_analysis) return '';
+    return marked(props.latestVersionComparison.analysis.impact_analysis) as string;
+});
+
+// Render document analysis summary as HTML
+const renderedAnalysisSummary = computed(() => {
+    if (!props.analysis?.summary) return '';
+    return marked(props.analysis.summary) as string;
+});
+
+// Render document analysis recommendations as HTML
+const renderedAnalysisRecommendations = computed(() => {
+    if (!props.analysis?.recommendations) return '';
+    return marked(props.analysis.recommendations) as string;
+});
+
 const breadcrumbs = computed<BreadcrumbItem[]>(() => [
     { title: 'Dashboard', href: '/dashboard' },
     { title: 'Companies', href: '/companies' },
@@ -496,7 +548,8 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
     <Head :title="`${document.document_type} - ${document.company_name}`" />
 
     <AppLayout :breadcrumbs="breadcrumbs">
-        <div class="flex h-full flex-1 flex-col gap-6 p-4">
+        <div class="mx-auto w-full max-w-6xl px-4 py-6">
+        <div class="flex h-full flex-1 flex-col gap-6">
             <!-- Back Link -->
             <div>
                 <Link
@@ -593,6 +646,115 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
                     </CardContent>
                 </Card>
             </div>
+
+            <!-- Latest Version Changes Summary -->
+            <Card v-if="latestVersionComparison">
+                <CardHeader>
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <CardTitle class="flex items-center gap-2">
+                                <GitCompare class="h-5 w-5" />
+                                Latest Changes
+                                <Badge variant="secondary" class="ml-2">
+                                    v{{ latestVersionComparison.old_version_number }} → v{{ latestVersionComparison.new_version_number }}
+                                </Badge>
+                                <Badge
+                                    v-if="latestVersionComparison.analysis.is_suspicious_timing"
+                                    variant="destructive"
+                                    class="ml-1"
+                                >
+                                    ⚠️ Suspicious Timing
+                                </Badge>
+                            </CardTitle>
+                            <CardDescription>
+                                AI analysis of changes from the previous version
+                            </CardDescription>
+                        </div>
+                        <Link :href="latestVersionComparison.compare_url">
+                            <Button variant="outline" size="sm">
+                                <GitCompare class="mr-2 h-4 w-4" />
+                                View Full Comparison
+                            </Button>
+                        </Link>
+                    </div>
+                </CardHeader>
+                <CardContent class="space-y-4">
+                    <!-- Impact Score Delta - Always visible -->
+                    <div
+                        v-if="latestVersionComparison.analysis.impact_score_delta !== null"
+                        class="flex items-center gap-3 rounded-lg p-3"
+                        :class="{
+                            'bg-red-50 dark:bg-red-950/30': latestVersionComparison.analysis.impact_score_delta < -5,
+                            'bg-yellow-50 dark:bg-yellow-950/30': latestVersionComparison.analysis.impact_score_delta >= -5 && latestVersionComparison.analysis.impact_score_delta < 0,
+                            'bg-gray-50 dark:bg-gray-800/30': latestVersionComparison.analysis.impact_score_delta === 0,
+                            'bg-green-50 dark:bg-green-950/30': latestVersionComparison.analysis.impact_score_delta > 0,
+                        }"
+                    >
+                        <div
+                            class="flex h-12 w-12 items-center justify-center rounded-full text-lg font-bold"
+                            :class="{
+                                'bg-red-100 text-red-700': latestVersionComparison.analysis.impact_score_delta < -5,
+                                'bg-yellow-100 text-yellow-700': latestVersionComparison.analysis.impact_score_delta >= -5 && latestVersionComparison.analysis.impact_score_delta < 0,
+                                'bg-gray-100 text-gray-700': latestVersionComparison.analysis.impact_score_delta === 0,
+                                'bg-green-100 text-green-700': latestVersionComparison.analysis.impact_score_delta > 0,
+                            }"
+                        >
+                            {{ latestVersionComparison.analysis.impact_score_delta > 0 ? '+' : '' }}{{ latestVersionComparison.analysis.impact_score_delta }}
+                        </div>
+                        <div class="flex-1">
+                            <p class="font-medium">
+                                <span v-if="latestVersionComparison.analysis.impact_score_delta < -5">Significant Negative Impact</span>
+                                <span v-else-if="latestVersionComparison.analysis.impact_score_delta < 0">Minor Negative Impact</span>
+                                <span v-else-if="latestVersionComparison.analysis.impact_score_delta === 0">Neutral Changes</span>
+                                <span v-else>Positive Impact</span>
+                            </p>
+                            <p class="text-sm text-muted-foreground">
+                                Impact score change from version {{ latestVersionComparison.old_version_number }} to {{ latestVersionComparison.new_version_number }}
+                            </p>
+                        </div>
+                        <!-- Expand/Collapse button -->
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            class="cursor-pointer"
+                            @click="showLatestChangesDetails = !showLatestChangesDetails"
+                        >
+                            <component :is="showLatestChangesDetails ? ChevronUp : ChevronDown" class="mr-1 h-4 w-4" />
+                            {{ showLatestChangesDetails ? 'Hide Details' : 'Show Details' }}
+                        </Button>
+                    </div>
+
+                    <!-- Collapsible Details -->
+                    <template v-if="showLatestChangesDetails">
+                        <!-- Summary -->
+                        <div v-if="latestVersionComparison.analysis.summary" class="rounded-lg bg-muted p-5">
+                            <div
+                                class="prose dark:prose-invert max-w-none prose-headings:text-lg prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-3 prose-p:my-3 prose-p:leading-relaxed prose-ul:my-3 prose-li:my-1 prose-li:leading-relaxed prose-strong:text-foreground"
+                                v-html="renderedComparisonSummary"
+                            />
+                        </div>
+
+                        <!-- Impact Analysis -->
+                        <div v-if="latestVersionComparison.analysis.impact_analysis" class="rounded-lg border p-5">
+                            <div
+                                class="prose dark:prose-invert max-w-none prose-headings:text-lg prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-3 prose-p:my-3 prose-p:leading-relaxed prose-ul:my-3 prose-li:my-1 prose-li:leading-relaxed prose-strong:text-foreground"
+                                v-html="renderedComparisonImpact"
+                            />
+                        </div>
+
+                        <!-- Link to full comparison -->
+                        <div class="flex justify-center pt-2">
+                            <Link :href="latestVersionComparison.compare_url">
+                                <Button variant="default">
+                                    <GitCompare class="mr-2 h-4 w-4" />
+                                    View Full Diff & Details
+                                    <ArrowRight class="ml-2 h-4 w-4" />
+                                </Button>
+                            </Link>
+                        </div>
+                    </template>
+                </CardContent>
+            </Card>
 
             <!-- Metadata -->
             <Card>
@@ -810,86 +972,89 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
                         </div>
 
                         <!-- Summary -->
-                        <div v-if="analysis.summary">
-                            <h4 class="font-semibold mb-2">Summary</h4>
-                            <p class="text-sm text-muted-foreground whitespace-pre-line">{{ analysis.summary }}</p>
+                        <div v-if="analysis.summary" class="rounded-lg bg-muted p-5">
+                            <h4 class="font-semibold mb-3 text-lg">📋 Summary</h4>
+                            <div
+                                class="prose dark:prose-invert max-w-none prose-headings:text-lg prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-3 prose-p:my-3 prose-p:leading-relaxed prose-ul:my-3 prose-li:my-1 prose-li:leading-relaxed prose-strong:text-foreground"
+                                v-html="renderedAnalysisSummary"
+                            />
                         </div>
 
                         <!-- Flags Overview -->
                         <div class="grid gap-4 md:grid-cols-3">
                             <!-- Red Flags (Concerns) -->
-                            <div class="border rounded-lg p-4">
-                                <div class="flex items-center gap-2 mb-3">
+                            <div class="border rounded-lg p-5 bg-red-50/50 dark:bg-red-950/20">
+                                <div class="flex items-center gap-2 mb-4">
                                     <AlertTriangle class="h-5 w-5 text-red-500" />
-                                    <h4 class="font-semibold text-red-700">Key Concerns</h4>
+                                    <h4 class="font-semibold text-red-700 dark:text-red-400">❌ Key Concerns</h4>
                                     <Badge variant="destructive" class="ml-auto">
                                         {{ analysis.flags?.red?.length ?? 0 }}
                                     </Badge>
                                 </div>
-                                <ul v-if="analysis.flags?.red?.length" class="space-y-2 text-sm">
+                                <ul v-if="analysis.flags?.red?.length" class="space-y-3">
                                     <li
                                         v-for="(flag, idx) in (showAllFlags ? analysis.flags.red : analysis.flags.red.slice(0, 3))"
                                         :key="idx"
                                         class="flex items-start gap-2"
                                     >
-                                        <ThumbsDown class="h-4 w-4 text-red-500 flex-shrink-0 mt-0.5" />
+                                        <ThumbsDown class="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" />
                                         <div>
-                                            <span class="font-medium">{{ formatFlagType(flag.type) }}</span>
-                                            <p class="text-muted-foreground text-xs">{{ flag.description }}</p>
+                                            <span class="font-semibold">{{ formatFlagType(flag.type) }}</span>
+                                            <p class="text-muted-foreground text-sm mt-1 leading-relaxed">{{ flag.description }}</p>
                                         </div>
                                     </li>
                                 </ul>
-                                <p v-else class="text-sm text-muted-foreground">No major concerns found</p>
+                                <p v-else class="text-muted-foreground">No major concerns found</p>
                             </div>
 
                             <!-- Yellow Flags (Cautions) -->
-                            <div class="border rounded-lg p-4">
-                                <div class="flex items-center gap-2 mb-3">
+                            <div class="border rounded-lg p-5 bg-yellow-50/50 dark:bg-yellow-950/20">
+                                <div class="flex items-center gap-2 mb-4">
                                     <AlertTriangle class="h-5 w-5 text-yellow-500" />
-                                    <h4 class="font-semibold text-yellow-700">Cautions</h4>
-                                    <Badge variant="secondary" class="ml-auto bg-yellow-100 text-yellow-800">
+                                    <h4 class="font-semibold text-yellow-700 dark:text-yellow-400">⚠️ Cautions</h4>
+                                    <Badge variant="secondary" class="ml-auto bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">
                                         {{ analysis.flags?.yellow?.length ?? 0 }}
                                     </Badge>
                                 </div>
-                                <ul v-if="analysis.flags?.yellow?.length" class="space-y-2 text-sm">
+                                <ul v-if="analysis.flags?.yellow?.length" class="space-y-3">
                                     <li
                                         v-for="(flag, idx) in (showAllFlags ? analysis.flags.yellow : analysis.flags.yellow.slice(0, 3))"
                                         :key="idx"
                                         class="flex items-start gap-2"
                                     >
-                                        <AlertTriangle class="h-4 w-4 text-yellow-500 flex-shrink-0 mt-0.5" />
+                                        <AlertTriangle class="h-5 w-5 text-yellow-500 flex-shrink-0 mt-0.5" />
                                         <div>
-                                            <span class="font-medium">{{ formatFlagType(flag.type) }}</span>
-                                            <p class="text-muted-foreground text-xs">{{ flag.description }}</p>
+                                            <span class="font-semibold">{{ formatFlagType(flag.type) }}</span>
+                                            <p class="text-muted-foreground text-sm mt-1 leading-relaxed">{{ flag.description }}</p>
                                         </div>
                                     </li>
                                 </ul>
-                                <p v-else class="text-sm text-muted-foreground">No cautions found</p>
+                                <p v-else class="text-muted-foreground">No cautions found</p>
                             </div>
 
                             <!-- Green Flags (Positives) -->
-                            <div class="border rounded-lg p-4">
-                                <div class="flex items-center gap-2 mb-3">
+                            <div class="border rounded-lg p-5 bg-green-50/50 dark:bg-green-950/20">
+                                <div class="flex items-center gap-2 mb-4">
                                     <ShieldCheck class="h-5 w-5 text-green-500" />
-                                    <h4 class="font-semibold text-green-700">Positive Aspects</h4>
-                                    <Badge variant="secondary" class="ml-auto bg-green-100 text-green-800">
+                                    <h4 class="font-semibold text-green-700 dark:text-green-400">✅ Positive Aspects</h4>
+                                    <Badge variant="secondary" class="ml-auto bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
                                         {{ analysis.flags?.green?.length ?? 0 }}
                                     </Badge>
                                 </div>
-                                <ul v-if="analysis.flags?.green?.length" class="space-y-2 text-sm">
+                                <ul v-if="analysis.flags?.green?.length" class="space-y-3">
                                     <li
                                         v-for="(flag, idx) in (showAllFlags ? analysis.flags.green : analysis.flags.green.slice(0, 3))"
                                         :key="idx"
                                         class="flex items-start gap-2"
                                     >
-                                        <ThumbsUp class="h-4 w-4 text-green-500 flex-shrink-0 mt-0.5" />
+                                        <ThumbsUp class="h-5 w-5 text-green-500 flex-shrink-0 mt-0.5" />
                                         <div>
-                                            <span class="font-medium">{{ formatFlagType(flag.type) }}</span>
-                                            <p class="text-muted-foreground text-xs">{{ flag.description }}</p>
+                                            <span class="font-semibold">{{ formatFlagType(flag.type) }}</span>
+                                            <p class="text-muted-foreground text-sm mt-1 leading-relaxed">{{ flag.description }}</p>
                                         </div>
                                     </li>
                                 </ul>
-                                <p v-else class="text-sm text-muted-foreground">No positives found</p>
+                                <p v-else class="text-muted-foreground">No positives found</p>
                             </div>
                         </div>
 
@@ -905,38 +1070,41 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
                         </div>
 
                         <!-- Recommendations -->
-                        <div v-if="analysis.recommendations" class="border rounded-lg p-4 bg-blue-50">
-                            <div class="flex items-center gap-2 mb-2">
-                                <Lightbulb class="h-5 w-5 text-blue-600" />
-                                <h4 class="font-semibold text-blue-800">Recommendations</h4>
-                            </div>
-                            <p class="text-sm text-blue-900 whitespace-pre-line">{{ analysis.recommendations }}</p>
+                        <div v-if="analysis.recommendations" class="border rounded-lg p-5 bg-blue-50 dark:bg-blue-950/30">
+                            <h4 class="font-semibold mb-3 text-lg text-blue-800 dark:text-blue-300 flex items-center gap-2">
+                                <Lightbulb class="h-5 w-5" />
+                                Recommendations
+                            </h4>
+                            <div
+                                class="prose dark:prose-invert max-w-none prose-headings:text-lg prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-3 prose-p:my-3 prose-p:leading-relaxed prose-ul:my-3 prose-li:my-1 prose-li:leading-relaxed prose-strong:text-foreground text-blue-900 dark:text-blue-100"
+                                v-html="renderedAnalysisRecommendations"
+                            />
                         </div>
 
                         <!-- FAQ Section -->
                         <div v-if="analysis.extracted_data?.faq?.length">
-                            <div class="flex items-center gap-2 mb-3">
+                            <h4 class="font-semibold mb-4 text-lg flex items-center gap-2">
                                 <HelpCircle class="h-5 w-5" />
-                                <h4 class="font-semibold">Frequently Asked Questions</h4>
-                            </div>
-                            <div class="space-y-2">
+                                ❓ Frequently Asked Questions
+                            </h4>
+                            <div class="space-y-3">
                                 <div
                                     v-for="(faq, idx) in analysis.extracted_data.faq"
                                     :key="idx"
                                     class="border rounded-lg overflow-hidden"
                                 >
                                     <button
-                                        class="w-full flex items-center justify-between p-3 text-left hover:bg-muted/50 transition-colors"
+                                        class="w-full flex items-center justify-between p-4 text-left hover:bg-muted/50 transition-colors cursor-pointer"
                                         @click="toggleFaq(idx)"
                                     >
-                                        <span class="font-medium text-sm">{{ faq.question }}</span>
-                                        <component :is="expandedFaqIndex === idx ? ChevronUp : ChevronDown" class="h-4 w-4 flex-shrink-0" />
+                                        <span class="font-medium">{{ faq.question }}</span>
+                                        <component :is="expandedFaqIndex === idx ? ChevronUp : ChevronDown" class="h-5 w-5 flex-shrink-0 ml-2" />
                                     </button>
-                                    <div v-if="expandedFaqIndex === idx" class="px-3 pb-3 pt-1 border-t bg-muted/30">
-                                        <p class="text-sm font-medium mb-1">{{ faq.short_answer }}</p>
-                                        <p class="text-sm text-muted-foreground">{{ faq.long_answer }}</p>
-                                        <div v-if="faq.what_to_watch_for" class="mt-2 text-xs text-amber-700 bg-amber-50 p-2 rounded">
-                                            <strong>Watch for:</strong> {{ faq.what_to_watch_for }}
+                                    <div v-if="expandedFaqIndex === idx" class="px-4 pb-4 pt-2 border-t bg-muted/30">
+                                        <p class="font-semibold mb-2 text-green-700 dark:text-green-400">✅ {{ faq.short_answer }}</p>
+                                        <p class="text-muted-foreground leading-relaxed">{{ faq.long_answer }}</p>
+                                        <div v-if="faq.what_to_watch_for" class="mt-3 text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 p-3 rounded-lg">
+                                            <strong>⚠️ Watch for:</strong> {{ faq.what_to_watch_for }}
                                         </div>
                                     </div>
                                 </div>
@@ -1362,6 +1530,7 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
                     </Button>
                 </a>
             </div>
+        </div>
         </div>
     </AppLayout>
 </template>
