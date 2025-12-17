@@ -46,6 +46,7 @@ import {
 } from '@/components/ui/card';
 import { computed, ref, onMounted, onUnmounted } from 'vue';
 import { marked } from 'marked';
+import DocumentChat from '@/components/DocumentChat.vue';
 
 interface DocumentData {
     id: number;
@@ -1532,5 +1533,11 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
             </div>
         </div>
         </div>
+
+        <!-- Floating Chat Sidebar -->
+        <DocumentChat
+            :document-id="document.id"
+            :has-content="!!currentVersion"
+        />
     </AppLayout>
 </template>

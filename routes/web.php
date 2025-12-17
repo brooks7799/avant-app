@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\CompanyController;
+use App\Http\Controllers\DocumentChatController;
 use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\QueueController;
@@ -44,6 +45,13 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('documents/{document}/analysis-status', [DocumentController::class, 'analysisStatus'])->name('documents.analysis-status');
     Route::post('websites/{website}/documents/from-discovery', [DocumentController::class, 'createFromDiscovery'])->name('websites.documents.from-discovery');
 
+    // Document chat routes
+    Route::get('documents/{document}/chat', [DocumentChatController::class, 'index'])->name('documents.chat.index');
+    Route::post('documents/{document}/chat', [DocumentChatController::class, 'send'])->name('documents.chat.send');
+    Route::post('documents/{document}/chat/new', [DocumentChatController::class, 'store'])->name('documents.chat.store');
+    Route::get('documents/{document}/chat/{chat}', [DocumentChatController::class, 'show'])->name('documents.chat.show');
+    Route::delete('documents/{document}/chat', [DocumentChatController::class, 'clear'])->name('documents.chat.clear');
+
     // Product routes
     Route::post('companies/{company}/products', [ProductController::class, 'store'])->name('companies.products.store');
     Route::put('products/{product}', [ProductController::class, 'update'])->name('products.update');
@@ -75,6 +83,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('queue/scrape/{scrapeJob}', [QueueController::class, 'showScrapeJob'])->name('queue.scrape.show');
     Route::get('queue/scrape/{scrapeJob}/status', [QueueController::class, 'scrapeJobStatus'])->name('queue.scrape.status');
     Route::post('queue/scrape/{scrapeJob}/retry', [QueueController::class, 'retryScrapeJob'])->name('queue.scrape.retry');
+    Route::post('queue/scrape/{scrapeJob}/cancel', [QueueController::class, 'cancelScrapeJob'])->name('queue.scrape.cancel');
+    Route::post('queue/discovery/{discoveryJob}/cancel', [QueueController::class, 'cancelDiscoveryJob'])->name('queue.discovery.cancel');
     Route::get('queue/version/{version}', [QueueController::class, 'showDocumentVersion'])->name('queue.version.show');
     Route::post('queue/version/{version}/extract-metadata', [QueueController::class, 'extractVersionMetadata'])->name('queue.version.extract-metadata');
 

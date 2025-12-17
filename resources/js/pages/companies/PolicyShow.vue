@@ -33,6 +33,7 @@ import {
     CardTitle,
 } from '@/components/ui/card';
 import { ref, computed } from 'vue';
+import { marked } from 'marked';
 
 interface VersionAnalysis {
     id: number;
@@ -147,6 +148,12 @@ const currentVersion = computed(() => {
 
 // Get the current analysis from the current version
 const currentAnalysis = computed(() => currentVersion.value?.analysis || null);
+
+// Rendered markdown for analysis summary
+const renderedAnalysisSummary = computed(() => {
+    if (!currentAnalysis.value?.summary) return '';
+    return marked(currentAnalysis.value.summary) as string;
+});
 
 function retrievePolicy() {
     if (!props.discoveryJobId || props.discoveryIndex === null) return;
@@ -281,7 +288,8 @@ function getPreviousVersion(versionIndex: number) {
     <Head :title="`Policy - ${formatDetectedType(policy.detected_type)} - ${company.name}`" />
 
     <AppLayout :breadcrumbs="breadcrumbs">
-        <div class="flex h-full flex-1 flex-col gap-6 p-4">
+        <div class="mx-auto w-full max-w-6xl px-4 py-6">
+        <div class="flex h-full flex-1 flex-col gap-6">
             <!-- Header -->
             <div class="flex items-start justify-between">
                 <div class="flex items-start gap-4">
@@ -368,8 +376,13 @@ function getPreviousVersion(versionIndex: number) {
                                 <Brain class="h-4 w-4" />
                                 AI Analysis Summary
                             </h3>
-                            <p class="text-sm leading-relaxed">
-                                {{ currentAnalysis.summary || 'No summary available.' }}
+                            <div
+                                v-if="renderedAnalysisSummary"
+                                class="prose prose-sm dark:prose-invert max-w-none text-sm leading-relaxed prose-p:my-2 prose-ul:my-2 prose-li:my-0.5 prose-headings:text-base prose-headings:font-semibold prose-headings:mt-3 prose-headings:mb-1"
+                                v-html="renderedAnalysisSummary"
+                            />
+                            <p v-else class="text-sm leading-relaxed text-muted-foreground">
+                                No summary available.
                             </p>
                             <div v-if="currentAnalysis.tags?.length" class="mt-3 flex flex-wrap gap-1.5">
                                 <Badge
@@ -741,6 +754,7 @@ function getPreviousVersion(versionIndex: number) {
                     </div>
                 </CardContent>
             </Card>
+        </div>
         </div>
     </AppLayout>
 </template>

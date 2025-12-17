@@ -20,12 +20,77 @@ class PolicyDiscoveryService
     public function __construct(
         protected HttpClientService $httpClient,
         protected ContentExtractorService $extractor,
+        protected BrowserRendererService $browserRenderer,
     ) {
         $this->commonPaths = config('scraper.discovery.common_paths', []);
         $this->policyKeywords = config('scraper.discovery.policy_keywords', []);
         $this->typePatterns = config('scraper.discovery.type_patterns', []);
         $this->maxDepth = config('scraper.discovery.max_depth', 3);
         $this->maxPages = config('scraper.discovery.max_pages', 100);
+    }
+
+    /**
+     * Fetch a URL, trying HTTP first then falling back to browser if blocked.
+     */
+    protected function fetchUrl(string $url, ?DiscoveryJob $job = null): ?string
+    {
+        // First try HTTP
+        try {
+            $response = $this->httpClient->get($url);
+
+            if ($response->successful()) {
+                return $response->body();
+            }
+
+            // If 403/401, try browser rendering
+            if ($response->status() === 403 || $response->status() === 401) {
+                $job?->logInfo("HTTP blocked (status {$response->status()}), trying headless browser...");
+                return $this->fetchWithBrowser($url, $job);
+            }
+
+            return null;
+        } catch (\Exception $e) {
+            // HTTP failed, try browser
+            $job?->logInfo("HTTP failed ({$e->getMessage()}), trying headless browser...");
+            return $this->fetchWithBrowser($url, $job);
+        }
+    }
+
+    /**
+     * Fetch a URL using headless browser.
+     */
+    protected function fetchWithBrowser(string $url, ?DiscoveryJob $job = null): ?string
+    {
+        $browser = $this->browserRenderer->getBestAvailableBrowser();
+        $job?->logInfo("Using {$browser} browser to fetch {$url}");
+
+        $result = $this->browserRenderer->render($url, [
+            'browser' => $browser,
+            'timeout' => 30000,
+            'waitUntil' => 'networkidle2',
+        ]);
+
+        if ($result->success && $result->html) {
+            $job?->logSuccess("Browser fetch successful");
+            return $result->html;
+        }
+
+        $job?->logError("Browser fetch failed: " . ($result->error ?? 'Unknown error'));
+        return null;
+    }
+
+    /**
+     * Check if a URL is accessible (returns true/false).
+     * Uses HTTP only for speed - browser fallback only for homepage.
+     */
+    protected function isUrlAccessible(string $url, ?DiscoveryJob $job = null): bool
+    {
+        try {
+            $response = $this->httpClient->get($url);
+            return $response->successful();
+        } catch (\Exception $e) {
+            return false;
+        }
     }
 
     /**
@@ -279,26 +344,20 @@ class PolicyDiscoveryService
             }
 
             $visitedUrls[$url] = true;
+            $result['crawled']++;
 
-            try {
-                $response = $this->httpClient->get($url);
-                $result['crawled']++;
+            if ($this->isUrlAccessible($url, $job)) {
+                $type = $this->detectDocumentType($url);
 
-                if ($response->successful()) {
-                    $type = $this->detectDocumentType($url);
-
-                    $result['policies'][] = new DiscoveredPolicy(
-                        url: $url,
-                        detectedType: $type['slug'] ?? null,
-                        documentTypeId: $type['id'] ?? null,
-                        confidence: 0.9,
-                        discoveryMethod: 'common_paths',
-                    );
-                    $typeLabel = $type['slug'] ?? 'unknown';
-                    $job?->logSuccess("Found policy at common path: {$typeLabel} at {$url}", ['url' => $url, 'type' => $typeLabel]);
-                }
-            } catch (\Exception $e) {
-                // URL not accessible - continue
+                $result['policies'][] = new DiscoveredPolicy(
+                    url: $url,
+                    detectedType: $type['slug'] ?? null,
+                    documentTypeId: $type['id'] ?? null,
+                    confidence: 0.9,
+                    discoveryMethod: 'common_paths',
+                );
+                $typeLabel = $type['slug'] ?? 'unknown';
+                $job?->logSuccess("Found policy at common path: {$typeLabel} at {$url}", ['url' => $url, 'type' => $typeLabel]);
             }
         }
 
@@ -320,55 +379,44 @@ class PolicyDiscoveryService
         }
 
         $visitedUrls[$url] = true;
+        $result['crawled']++;
 
-        try {
-            $response = $this->httpClient->get($url);
-            $result['crawled']++;
+        $html = $this->fetchUrl($url, $job);
 
-            if (!$response->successful()) {
-                return $result;
-            }
+        if (!$html) {
+            return $result;
+        }
 
-            $html = $response->body();
-            $links = $this->extractor->extractLinks($html, $baseUrl);
-            $job?->logInfo("Found " . count($links) . " links on page");
+        $links = $this->extractor->extractLinks($html, $baseUrl);
+        $job?->logInfo("Found " . count($links) . " links on page");
 
-            foreach ($links as $link) {
-                $linkUrl = $link['url'];
-                $linkText = $link['text'];
+        foreach ($links as $link) {
+            $linkUrl = $link['url'];
+            $linkText = $link['text'];
 
-                // Check if link is likely a policy link
-                if ($this->isPolicyUrl($linkUrl) || $this->isPolicyLinkText($linkText)) {
-                    // Verify the URL is accessible
-                    if (!isset($visitedUrls[$linkUrl])) {
-                        $visitedUrls[$linkUrl] = true;
+            // Check if link is likely a policy link
+            if ($this->isPolicyUrl($linkUrl) || $this->isPolicyLinkText($linkText)) {
+                // Verify the URL is accessible
+                if (!isset($visitedUrls[$linkUrl])) {
+                    $visitedUrls[$linkUrl] = true;
+                    $result['crawled']++;
 
-                        try {
-                            $linkResponse = $this->httpClient->get($linkUrl);
-                            $result['crawled']++;
+                    if ($this->isUrlAccessible($linkUrl, $job)) {
+                        $type = $this->detectDocumentType($linkUrl, $linkText);
 
-                            if ($linkResponse->successful()) {
-                                $type = $this->detectDocumentType($linkUrl, $linkText);
-
-                                $result['policies'][] = new DiscoveredPolicy(
-                                    url: $linkUrl,
-                                    detectedType: $type['slug'] ?? null,
-                                    documentTypeId: $type['id'] ?? null,
-                                    confidence: 0.8,
-                                    discoveryMethod: 'crawl',
-                                    linkText: $linkText,
-                                );
-                                $typeLabel = $type['slug'] ?? 'unknown';
-                                $job?->logSuccess("Found policy via crawl: {$typeLabel} at {$linkUrl}", ['url' => $linkUrl, 'type' => $typeLabel]);
-                            }
-                        } catch (\Exception $e) {
-                            // Link not accessible
-                        }
+                        $result['policies'][] = new DiscoveredPolicy(
+                            url: $linkUrl,
+                            detectedType: $type['slug'] ?? null,
+                            documentTypeId: $type['id'] ?? null,
+                            confidence: 0.8,
+                            discoveryMethod: 'crawl',
+                            linkText: $linkText,
+                        );
+                        $typeLabel = $type['slug'] ?? 'unknown';
+                        $job?->logSuccess("Found policy via crawl: {$typeLabel} at {$linkUrl}", ['url' => $linkUrl, 'type' => $typeLabel]);
                     }
                 }
             }
-        } catch (\Exception $e) {
-            // Crawl failed
         }
 
         return $result;

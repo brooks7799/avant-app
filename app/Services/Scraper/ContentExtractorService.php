@@ -208,6 +208,78 @@ class ContentExtractorService
     }
 
     /**
+     * Detect if the page is a "table of contents" landing page.
+     * These pages have minimal content and primarily consist of links to sections.
+     */
+    public function isLandingPage(string $html): bool
+    {
+        $text = strip_tags($html);
+        $wordCount = str_word_count($text);
+
+        // Landing pages typically have low word count
+        if ($wordCount > 1500) {
+            return false; // Too much content to be just a TOC
+        }
+
+        // Check for numbered section patterns (1., 2., 3... or Section 1, etc.)
+        $numberedPatterns = preg_match_all('/\b(?:section\s*)?\d+[.:]\s/i', $text);
+
+        // If there are multiple numbered sections and low word count, it's likely a TOC
+        if ($numberedPatterns >= 3 && $wordCount < 800) {
+            return true;
+        }
+
+        // Check for multiple anchor links to same page (common in TOC pages)
+        $crawler = new Crawler($html);
+        try {
+            $anchorLinks = $crawler->filter('a[href^="#"]')->count();
+            if ($anchorLinks >= 5 && $wordCount < 1000) {
+                return true;
+            }
+        } catch (\Exception $e) {
+            // Continue with other checks
+        }
+
+        return false;
+    }
+
+    /**
+     * Find a "full document" link on a landing/TOC page.
+     * Looks for links with text like "Read the full...", "View complete...", etc.
+     */
+    public function findFullDocumentLink(string $html, string $baseUrl): ?string
+    {
+        // Patterns for "full version" link text
+        $textPatterns = [
+            'read the full',
+            'view full',
+            'full terms',
+            'complete terms',
+            'full agreement',
+            'complete agreement',
+            'full policy',
+            'view complete',
+            'read complete',
+            'see full',
+            'entire agreement',
+            'all terms',
+        ];
+
+        $links = $this->extractLinks($html, $baseUrl);
+
+        foreach ($links as $link) {
+            $linkText = strtolower($link['text']);
+            foreach ($textPatterns as $pattern) {
+                if (str_contains($linkText, $pattern)) {
+                    return $link['url'];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Resolve a relative URL to absolute.
      */
     protected function resolveUrl(string $url, string $baseUrl): ?string

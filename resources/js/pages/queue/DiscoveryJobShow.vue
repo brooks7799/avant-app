@@ -116,6 +116,7 @@ function getStatusIcon(status: string) {
         case 'completed':
             return CheckCircle2;
         case 'failed':
+        case 'cancelled':
             return XCircle;
         case 'running':
             return Loader2;
@@ -130,6 +131,7 @@ function getStatusColor(status: string) {
         case 'completed':
             return 'text-green-500';
         case 'failed':
+        case 'cancelled':
             return 'text-red-500';
         case 'running':
             return 'text-blue-500';
@@ -144,6 +146,7 @@ function getStatusBadgeVariant(status: string): 'default' | 'secondary' | 'destr
         case 'completed':
             return 'default';
         case 'failed':
+        case 'cancelled':
             return 'destructive';
         case 'running':
             return 'secondary';
@@ -181,7 +184,8 @@ function formatDocumentType(type: string | null): string {
     <Head :title="`Discovery Job #${job.id}`" />
 
     <AppLayout :breadcrumbs="breadcrumbs">
-        <div class="flex h-full flex-1 flex-col gap-6 p-4">
+        <div class="mx-auto w-full max-w-6xl px-4 py-6">
+        <div class="flex h-full flex-1 flex-col gap-6">
             <!-- Back Link -->
             <div>
                 <Link href="/queue" class="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
@@ -359,6 +363,7 @@ function formatDocumentType(type: string | null): string {
                     </Button>
                 </a>
             </div>
+        </div>
         </div>
     </AppLayout>
 </template>

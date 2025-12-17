@@ -85,6 +85,11 @@ class DocumentVersion extends Model
         return $this->hasMany(VersionComparison::class, 'new_version_id');
     }
 
+    public function chats(): HasMany
+    {
+        return $this->hasMany(DocumentChat::class);
+    }
+
     public function previousVersion(): ?DocumentVersion
     {
         return DocumentVersion::where('document_id', $this->document_id)

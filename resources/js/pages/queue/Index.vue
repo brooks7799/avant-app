@@ -19,6 +19,7 @@ import {
     Power,
     Eye,
     Brain,
+    StopCircle,
 } from 'lucide-vue-next';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -189,6 +190,106 @@ const filteredDiscoveryJobs = computed(() => filterJobs(props.recentDiscoveryJob
 const filteredAnalysisJobs = computed(() => filterJobs(props.recentAnalysisJobs));
 const filteredDiffAnalysisJobs = computed(() => filterJobs(props.recentDiffAnalysisJobs));
 
+// Get all currently running jobs (pending or running status)
+const runningJobs = computed(() => {
+    const jobs: Array<{ type: string; id: number; name: string; url?: string; status: string; created_at: string }> = [];
+
+    for (const job of props.recentScrapeJobs) {
+        if (job.status === 'pending' || job.status === 'running') {
+            jobs.push({
+                type: 'scrape',
+                id: job.id,
+                name: job.company_name || 'Unknown',
+                url: job.document_url || undefined,
+                status: job.status,
+                created_at: job.created_at,
+            });
+        }
+    }
+
+    for (const job of props.recentDiscoveryJobs) {
+        if (job.status === 'pending' || job.status === 'running') {
+            jobs.push({
+                type: 'discovery',
+                id: job.id,
+                name: job.company_name || 'Unknown',
+                url: job.website_url || undefined,
+                status: job.status,
+                created_at: job.created_at,
+            });
+        }
+    }
+
+    for (const job of props.recentAnalysisJobs) {
+        if (job.status === 'pending' || job.status === 'running') {
+            jobs.push({
+                type: 'analysis',
+                id: job.id,
+                name: job.company_name || 'Unknown',
+                status: job.status,
+                created_at: job.created_at,
+            });
+        }
+    }
+
+    for (const job of props.recentDiffAnalysisJobs) {
+        if (job.status === 'pending' || job.status === 'processing') {
+            jobs.push({
+                type: 'diff',
+                id: job.id,
+                name: job.company_name || 'Unknown',
+                status: job.status,
+                created_at: job.created_at,
+            });
+        }
+    }
+
+    // Sort by created_at desc
+    return jobs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+});
+
+function getJobTypeLabel(type: string): string {
+    switch (type) {
+        case 'scrape': return 'Retrieval';
+        case 'discovery': return 'Discovery';
+        case 'analysis': return 'AI Analysis';
+        case 'diff': return 'Diff Analysis';
+        default: return type;
+    }
+}
+
+function getJobLink(job: { type: string; id: number }): string {
+    switch (job.type) {
+        case 'scrape': return `/queue/scrape/${job.id}`;
+        case 'discovery': return `/queue/discovery/${job.id}`;
+        default: return '#';
+    }
+}
+
+function cancelJob(job: { type: string; id: number }, event: Event) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    let url = '';
+    switch (job.type) {
+        case 'scrape':
+            url = `/queue/scrape/${job.id}/cancel`;
+            break;
+        case 'discovery':
+            url = `/queue/discovery/${job.id}/cancel`;
+            break;
+        default:
+            return;
+    }
+
+    router.post(url, {}, {
+        preserveScroll: true,
+        onSuccess: () => {
+            refreshData(true);
+        },
+    });
+}
+
 // Get counts for filter badges
 const getStatusCounts = computed(() => {
     const jobs = activeTab.value === 'scrape'
@@ -302,7 +403,7 @@ function refreshData(silent = false) {
         isRefreshing.value = true;
     }
     router.reload({
-        only: ['stats', 'recentScrapeJobs', 'recentDiscoveryJobs', 'recentAnalysisJobs', 'workerStatus'],
+        only: ['stats', 'recentScrapeJobs', 'recentDiscoveryJobs', 'recentAnalysisJobs', 'recentDiffAnalysisJobs', 'workerStatus'],
         onFinish: () => {
             isRefreshing.value = false;
             syncUptime();
@@ -430,7 +531,8 @@ function formatRelativeTime(dateString: string): string {
     <Head title="Queue Manager" />
 
     <AppLayout :breadcrumbs="breadcrumbs">
-        <div class="flex h-full flex-1 flex-col gap-6 p-4">
+        <div class="mx-auto w-full max-w-6xl px-4 py-6">
+        <div class="flex h-full flex-1 flex-col gap-6">
             <!-- Header with Queue Control -->
             <div class="flex items-center justify-between">
                 <div>
@@ -608,6 +710,67 @@ function formatRelativeTime(dateString: string): string {
                     </CardContent>
                 </Card>
             </div>
+
+            <!-- Active Jobs (Pending/Running) -->
+            <Card v-if="runningJobs.length > 0" class="border-blue-200 bg-blue-50 dark:border-blue-900 dark:bg-blue-950/30">
+                <CardHeader class="pb-2">
+                    <CardTitle class="flex items-center gap-2 text-blue-700 dark:text-blue-300">
+                        <Loader2 class="h-5 w-5 animate-spin" />
+                        Active Jobs ({{ runningJobs.length }})
+                    </CardTitle>
+                </CardHeader>
+                <CardContent>
+                    <div class="space-y-2">
+                        <div
+                            v-for="job in runningJobs"
+                            :key="`${job.type}-${job.id}`"
+                            class="flex items-center justify-between rounded-lg border border-blue-200 bg-white p-3 dark:border-blue-800 dark:bg-blue-950/50"
+                        >
+                            <Link
+                                :href="getJobLink(job)"
+                                class="flex items-center gap-3 flex-1 hover:opacity-80 transition-opacity cursor-pointer"
+                            >
+                                <Loader2
+                                    class="h-5 w-5 text-blue-500"
+                                    :class="{ 'animate-spin': job.status === 'running' }"
+                                />
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <span class="font-medium">{{ job.name }}</span>
+                                        <Badge variant="secondary" class="text-xs">
+                                            {{ getJobTypeLabel(job.type) }}
+                                        </Badge>
+                                        <Badge
+                                            :variant="job.status === 'running' ? 'default' : 'outline'"
+                                            class="text-xs"
+                                        >
+                                            {{ job.status }}
+                                        </Badge>
+                                    </div>
+                                    <div v-if="job.url" class="text-xs text-muted-foreground truncate max-w-md">
+                                        {{ job.url }}
+                                    </div>
+                                </div>
+                            </Link>
+                            <div class="flex items-center gap-3">
+                                <span class="text-xs text-muted-foreground whitespace-nowrap">
+                                    {{ formatRelativeTime(job.created_at) }}
+                                </span>
+                                <Button
+                                    v-if="job.type === 'scrape' || job.type === 'discovery'"
+                                    variant="ghost"
+                                    size="sm"
+                                    class="h-8 w-8 p-0 text-red-500 hover:text-red-700 hover:bg-red-100 dark:hover:bg-red-900/30"
+                                    @click="cancelJob(job, $event)"
+                                    title="Cancel job"
+                                >
+                                    <StopCircle class="h-4 w-4" />
+                                </Button>
+                            </div>
+                        </div>
+                    </div>
+                </CardContent>
+            </Card>
 
             <!-- Secondary Actions (only show if there are failed jobs or pending jobs) -->
             <div v-if="stats.failed_jobs > 0 || stats.pending_jobs > 0" class="flex flex-wrap gap-3">
@@ -1062,6 +1225,7 @@ function formatRelativeTime(dateString: string): string {
                     </div>
                 </CardContent>
             </Card>
+        </div>
         </div>
     </AppLayout>
 </template>

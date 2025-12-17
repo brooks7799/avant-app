@@ -515,13 +515,17 @@ class QueueController extends Controller
         $policy = $discoveredUrls[$index];
         $website = $discoveryJob->website;
 
-        // Check if document already exists
+        // Check if document already exists (by company_id + source_url which is the unique constraint)
         $existingDocument = Document::where('source_url', $policy['url'])
-            ->where('website_id', $website->id)
+            ->where('company_id', $website->company_id)
             ->first();
 
         if ($existingDocument) {
-            // Document exists, just create a new scrape job
+            // Document exists, just create a new scrape job if not already pending/running
+            if (in_array($existingDocument->scrape_status, ['pending', 'running'])) {
+                return redirect()->back()->with('info', 'Document already has a pending scrape job.');
+            }
+
             $scrapeJob = ScrapeJob::create([
                 'document_id' => $existingDocument->id,
                 'status' => 'pending',
@@ -587,20 +591,22 @@ class QueueController extends Controller
         $queued = 0;
 
         foreach ($discoveredUrls as $policy) {
-            // Check if document already exists
+            // Check if document already exists (by company_id + source_url which is the unique constraint)
             $existingDocument = Document::where('source_url', $policy['url'])
-                ->where('website_id', $website->id)
+                ->where('company_id', $website->company_id)
                 ->first();
 
             if ($existingDocument) {
-                // Document exists, create a scrape job
-                $scrapeJob = ScrapeJob::create([
-                    'document_id' => $existingDocument->id,
-                    'status' => 'pending',
-                ]);
+                // Document exists, create a scrape job if not already pending/running
+                if (!in_array($existingDocument->scrape_status, ['pending', 'running'])) {
+                    $scrapeJob = ScrapeJob::create([
+                        'document_id' => $existingDocument->id,
+                        'status' => 'pending',
+                    ]);
 
-                ScrapeDocumentJob::dispatch($existingDocument, $scrapeJob);
-                $queued++;
+                    ScrapeDocumentJob::dispatch($existingDocument, $scrapeJob);
+                    $queued++;
+                }
                 continue;
             }
 
@@ -708,6 +714,48 @@ class QueueController extends Controller
         return redirect()
             ->route('queue.scrape.show', $newJob)
             ->with('success', 'New retrieval job queued.');
+    }
+
+    /**
+     * Cancel a pending or running discovery job
+     */
+    public function cancelDiscoveryJob(DiscoveryJob $discoveryJob): RedirectResponse
+    {
+        if (!in_array($discoveryJob->status, ['pending', 'running'])) {
+            return redirect()->back()->with('error', 'Only pending or running jobs can be cancelled.');
+        }
+
+        $discoveryJob->update([
+            'status' => 'cancelled',
+            'completed_at' => now(),
+            'error_message' => 'Cancelled by user',
+        ]);
+
+        // Update website status
+        $discoveryJob->website?->update(['discovery_status' => 'idle']);
+
+        return redirect()->back()->with('success', 'Discovery job cancelled.');
+    }
+
+    /**
+     * Cancel a pending or running scrape job
+     */
+    public function cancelScrapeJob(ScrapeJob $scrapeJob): RedirectResponse
+    {
+        if (!in_array($scrapeJob->status, ['pending', 'running'])) {
+            return redirect()->back()->with('error', 'Only pending or running jobs can be cancelled.');
+        }
+
+        $scrapeJob->update([
+            'status' => 'cancelled',
+            'completed_at' => now(),
+            'error_message' => 'Cancelled by user',
+        ]);
+
+        // Update document status
+        $scrapeJob->document?->update(['scrape_status' => 'idle']);
+
+        return redirect()->back()->with('success', 'Scrape job cancelled.');
     }
 
     /**

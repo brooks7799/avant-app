@@ -169,7 +169,8 @@ function formatLanguage(lang: string | null): string {
     <Head :title="`Version ${version.version_number} - ${document.document_type || 'Document'}`" />
 
     <AppLayout :breadcrumbs="breadcrumbs">
-        <div class="flex h-full flex-1 flex-col gap-6 p-4">
+        <div class="mx-auto w-full max-w-6xl px-4 py-6">
+        <div class="flex h-full flex-1 flex-col gap-6">
             <!-- Header -->
             <div class="flex items-start justify-between">
                 <div class="flex items-start gap-4">
@@ -506,6 +507,7 @@ function formatLanguage(lang: string | null): string {
                     </CardContent>
                 </Card>
             </div>
+        </div>
         </div>
     </AppLayout>
 </template>

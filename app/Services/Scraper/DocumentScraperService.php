@@ -91,6 +91,22 @@ class DocumentScraperService
             $text = $this->extractor->toPlainText($extractedHtml);
             $job?->logInfo("Extracted " . strlen($text) . " characters of text");
 
+            // Check for a "full document" link (e.g., "Read the full terms...")
+            // This catches landing pages that may have lots of text but link to a complete version
+            $fullDocUrl = $this->extractor->findFullDocumentLink($html, $document->source_url);
+            if ($fullDocUrl && $fullDocUrl !== $document->source_url) {
+                $job?->logInfo("Found full document link: {$fullDocUrl}");
+
+                // Fetch the full document
+                $fullDocResult = $this->fetchFullDocument($fullDocUrl, $document, $job);
+                if ($fullDocResult) {
+                    $job?->logSuccess("Successfully scraped full document from: {$fullDocUrl}");
+                    return $fullDocResult;
+                }
+                // If full doc fetch failed, continue with original content
+                $job?->logWarning('Full document fetch failed, using original page content');
+            }
+
             // Validate content length
             $minLength = config('scraper.extraction.min_content_length', 500);
             if (strlen($text) < $minLength) {
@@ -243,6 +259,94 @@ class DocumentScraperService
             responseHeaders: [],
             finalUrl: $result->finalUrl ?? $document->source_url,
         );
+    }
+
+    /**
+     * Fetch the full document from a different URL (when landing page detected).
+     */
+    protected function fetchFullDocument(string $fullUrl, Document $document, ?ScrapeJob $job = null): ?ScrapeResult
+    {
+        try {
+            $job?->logInfo("Fetching full document from: {$fullUrl}");
+
+            $response = $this->httpClient->get($fullUrl);
+
+            if (!$response->successful()) {
+                $job?->logError("Full document fetch failed with status {$response->status()}");
+                return null;
+            }
+
+            $html = $response->body();
+            $job?->logSuccess("Full document fetched: " . strlen($html) . " bytes");
+
+            // Extract content from full document
+            $extractedHtml = $this->extractor->extract($html);
+            $text = $this->extractor->toPlainText($extractedHtml);
+
+            $job?->logInfo("Full document extracted: " . strlen($text) . " characters");
+
+            // Validate content is substantial
+            $minLength = config('scraper.extraction.min_content_length', 500);
+            if (strlen($text) < $minLength) {
+                $job?->logWarning("Full document content too short, trying browser...");
+
+                // Try browser rendering for the full document URL
+                $browserResult = $this->browserRenderer->render($fullUrl, [
+                    'browser' => $this->browserRenderer->getBestAvailableBrowser(),
+                    'timeout' => 30000,
+                    'waitUntil' => 'networkidle2',
+                ]);
+
+                if ($browserResult->success && strlen($browserResult->text) >= $minLength) {
+                    $html = $browserResult->html;
+                    $text = $browserResult->text;
+                    $extractedHtml = $html;
+                    $job?->logSuccess("Browser rendered full document: " . strlen($text) . " chars");
+                } else {
+                    $job?->logError("Full document still too short after browser rendering");
+                    return null;
+                }
+            }
+
+            // Convert to markdown
+            $markdown = $this->markdownConverter->convert($extractedHtml);
+
+            // Generate content hash
+            $hash = DocumentVersion::generateContentHash($text);
+
+            // Detect language
+            $language = $this->detectLanguage($text);
+
+            $wordCount = str_word_count($text);
+            $job?->logSuccess("Full document scrape complete: {$wordCount} words");
+
+            // Store metadata about the redirect
+            $job?->update([
+                'raw_html' => $html,
+                'extracted_html' => $extractedHtml,
+                'metadata' => array_merge($job->metadata ?? [], [
+                    'landing_url' => $document->source_url,
+                    'full_document_url' => $fullUrl,
+                ]),
+            ]);
+
+            return ScrapeResult::success(
+                contentRaw: $html,
+                contentText: $text,
+                contentMarkdown: $markdown,
+                contentHash: $hash,
+                wordCount: $wordCount,
+                characterCount: strlen($text),
+                language: $language,
+                httpStatus: $response->status(),
+                responseHeaders: $response->headers(),
+                finalUrl: $fullUrl,
+            );
+
+        } catch (\Exception $e) {
+            $job?->logError("Full document fetch error: {$e->getMessage()}");
+            return null;
+        }
     }
 
     /**

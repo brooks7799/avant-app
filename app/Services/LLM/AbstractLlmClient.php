@@ -92,6 +92,94 @@ abstract class AbstractLlmClient implements LlmClientInterface
         return $this->model;
     }
 
+    public function streamComplete(array $messages, array $options = []): \Generator
+    {
+        $this->checkRateLimit();
+
+        $payload = $this->buildPayload($messages, $options);
+        $payload['stream'] = true;
+
+        $url = rtrim($this->baseUrl, '/').'/chat/completions';
+
+        $allHeaders = array_merge([
+            'Authorization' => 'Bearer '.$this->apiKey,
+            'Content-Type' => 'application/json',
+            'Accept' => 'text/event-stream',
+        ], $this->getAdditionalHeaders());
+
+        // Build curl command for subprocess streaming
+        $headerArgs = [];
+        foreach ($allHeaders as $key => $value) {
+            $headerArgs[] = '-H';
+            $headerArgs[] = escapeshellarg("{$key}: {$value}");
+        }
+
+        $jsonPayload = json_encode($payload);
+        $tempFile = tempnam(sys_get_temp_dir(), 'llm_payload_');
+        file_put_contents($tempFile, $jsonPayload);
+
+        $cmd = sprintf(
+            'curl -sS -N --no-buffer -X POST %s -d @%s %s 2>&1',
+            implode(' ', $headerArgs),
+            escapeshellarg($tempFile),
+            escapeshellarg($url)
+        );
+
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+
+        $process = proc_open($cmd, $descriptors, $pipes);
+
+        if (! is_resource($process)) {
+            @unlink($tempFile);
+            throw new \RuntimeException('Failed to start curl process for streaming');
+        }
+
+        fclose($pipes[0]); // Close stdin
+
+        stream_set_blocking($pipes[1], false);
+        $buffer = '';
+
+        try {
+            while (! feof($pipes[1])) {
+                $chunk = fread($pipes[1], 4096);
+                if ($chunk === false || $chunk === '') {
+                    usleep(1000); // 1ms wait
+                    continue;
+                }
+
+                $buffer .= $chunk;
+
+                // Process complete SSE lines
+                while (($newlinePos = strpos($buffer, "\n")) !== false) {
+                    $line = trim(substr($buffer, 0, $newlinePos));
+                    $buffer = substr($buffer, $newlinePos + 1);
+
+                    if (str_starts_with($line, 'data: ')) {
+                        $jsonData = substr($line, 6);
+
+                        if ($jsonData === '[DONE]') {
+                            continue;
+                        }
+
+                        $json = json_decode($jsonData, true);
+                        if ($json && isset($json['choices'][0]['delta']['content'])) {
+                            yield $json['choices'][0]['delta']['content'];
+                        }
+                    }
+                }
+            }
+        } finally {
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            proc_close($process);
+            @unlink($tempFile);
+        }
+    }
+
     /**
      * Create the HTTP client with common configuration.
      */

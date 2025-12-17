@@ -9,20 +9,106 @@ use Illuminate\Support\Facades\Process;
 class BrowserRendererService
 {
     protected string $scriptPath;
+    protected string $stealthScriptPath;
     protected string $defaultBrowser;
     protected int $defaultTimeout;
 
     public function __construct()
     {
         $this->scriptPath = base_path('scripts/render-page.cjs');
+        $this->stealthScriptPath = base_path('scripts/render-page-stealth.cjs');
         $this->defaultBrowser = config('scraper.browser.default', 'chromium');
         $this->defaultTimeout = config('scraper.browser.timeout', 30000);
     }
 
     /**
      * Render a page using a headless browser.
+     * By default uses stealth mode to bypass bot detection.
      */
     public function render(string $url, array $options = []): BrowserRenderResult
+    {
+        // Use stealth mode by default
+        $useStealth = $options['stealth'] ?? true;
+        unset($options['stealth']);
+
+        if ($useStealth) {
+            return $this->renderStealth($url, $options);
+        }
+
+        return $this->renderStandard($url, $options);
+    }
+
+    /**
+     * Render using stealth browser (puppeteer with stealth plugin).
+     */
+    public function renderStealth(string $url, array $options = []): BrowserRenderResult
+    {
+        if (!file_exists($this->stealthScriptPath)) {
+            Log::warning('Stealth script not found, falling back to standard', [
+                'path' => $this->stealthScriptPath,
+            ]);
+            return $this->renderStandard($url, $options);
+        }
+
+        $options = array_merge([
+            'timeout' => $this->defaultTimeout,
+            'waitUntil' => 'networkidle2',
+        ], $options);
+
+        $options = array_filter($options, fn ($v) => $v !== null);
+        $optionsJson = json_encode($options);
+
+        try {
+            $result = Process::timeout(($options['timeout'] / 1000) + 30)
+                ->run([
+                    'node',
+                    $this->stealthScriptPath,
+                    $url,
+                    $optionsJson,
+                ]);
+
+            if (!$result->successful()) {
+                $errorOutput = $result->errorOutput();
+                Log::error('Stealth browser render failed', [
+                    'url' => $url,
+                    'exitCode' => $result->exitCode(),
+                    'error' => $errorOutput,
+                ]);
+
+                $output = $result->output();
+                if ($output && str_starts_with(trim($output), '{')) {
+                    $data = json_decode($output, true);
+                    if ($data && isset($data['error'])) {
+                        return BrowserRenderResult::failure($data['error']);
+                    }
+                }
+
+                return BrowserRenderResult::failure("Stealth browser failed: {$errorOutput}");
+            }
+
+            $output = $result->output();
+            $data = json_decode($output, true);
+
+            if (!$data) {
+                return BrowserRenderResult::failure('Failed to parse stealth browser output');
+            }
+
+            return BrowserRenderResult::fromJson($data);
+
+        } catch (\Exception $e) {
+            Log::error('Stealth browser exception', [
+                'url' => $url,
+                'error' => $e->getMessage(),
+            ]);
+
+            return BrowserRenderResult::failure($e->getMessage());
+        }
+    }
+
+    /**
+     * Render using standard browser (playwright).
+     */
+    public function renderStandard(string $url, array $options = []): BrowserRenderResult
     {
         if (!file_exists($this->scriptPath)) {
             return BrowserRenderResult::failure("Render script not found: {$this->scriptPath}");

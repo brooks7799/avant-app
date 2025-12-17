@@ -66,9 +66,7 @@ class DiscoveryJob extends Model
         $this->update([
             'status' => 'completed',
             'completed_at' => now(),
-            'duration_ms' => $this->started_at
-                ? now()->diffInMilliseconds($this->started_at)
-                : null,
+            'duration_ms' => $this->calculateDurationMs(),
             'urls_crawled' => $urlsCrawled,
             'policies_found' => count($discoveredUrls),
             'discovered_urls' => $discoveredUrls,
@@ -85,13 +83,29 @@ class DiscoveryJob extends Model
         $this->update([
             'status' => 'failed',
             'completed_at' => now(),
-            'duration_ms' => $this->started_at
-                ? now()->diffInMilliseconds($this->started_at)
-                : null,
+            'duration_ms' => $this->calculateDurationMs(),
             'error_message' => $error,
         ]);
 
         $this->website->markDiscoveryFailed();
+    }
+
+    /**
+     * Calculate duration in milliseconds (always positive, rounded to seconds).
+     */
+    protected function calculateDurationMs(): ?int
+    {
+        if (!$this->started_at) {
+            return null;
+        }
+
+        // Refresh to get accurate started_at from DB
+        $this->refresh();
+
+        $durationMs = abs(now()->diffInMilliseconds($this->started_at));
+
+        // Round to nearest second (1000ms)
+        return (int) (round($durationMs / 1000) * 1000);
     }
 
     /**

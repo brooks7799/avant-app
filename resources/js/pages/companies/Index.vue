@@ -80,7 +80,8 @@ function getStatusInfo(company: Company) {
     <Head title="Companies" />
 
     <AppLayout :breadcrumbs="breadcrumbs">
-        <div class="flex h-full flex-1 flex-col gap-4 p-4">
+        <div class="mx-auto w-full max-w-6xl px-4 py-6">
+        <div class="flex h-full flex-1 flex-col gap-4">
             <!-- Header -->
             <div class="flex items-center justify-between">
                 <div>
@@ -173,6 +174,7 @@ function getStatusInfo(company: Company) {
                     </Card>
                 </Link>
             </div>
+        </div>
         </div>
     </AppLayout>
 </template>

@@ -25,6 +25,15 @@ interface LlmClientInterface
     public function completeJson(array $messages, array $options = []): array;
 
     /**
+     * Send a streaming completion request to the LLM.
+     *
+     * @param  array  $messages  Array of message objects with 'role' and 'content' keys
+     * @param  array  $options  Additional options (temperature, max_tokens, etc.)
+     * @return \Generator<string>  Yields content chunks as they arrive
+     */
+    public function streamComplete(array $messages, array $options = []): \Generator;
+
+    /**
      * Get the name of this provider.
      */
     public function getProviderName(): string;

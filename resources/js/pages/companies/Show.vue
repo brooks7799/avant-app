@@ -782,7 +782,8 @@ function getPolicyDisplayName(policy: Policy): string {
     <Head :title="company.name" />
 
     <AppLayout :breadcrumbs="breadcrumbs">
-        <div class="flex h-full flex-1 flex-col gap-6 p-4">
+        <div class="mx-auto w-full max-w-6xl px-4 py-6">
+        <div class="flex h-full flex-1 flex-col gap-6">
             <!-- Header -->
             <div class="flex items-start justify-between">
                 <div class="flex items-start gap-4">
@@ -1595,6 +1596,7 @@ function getPolicyDisplayName(policy: Policy): string {
                     </Card>
                 </div>
             </div>
+        </div>
         </div>
 
         <!-- Add Document Dialog -->
