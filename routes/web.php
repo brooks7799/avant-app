@@ -3,6 +3,8 @@
 use App\Http\Controllers\CompanyController;
 use App\Http\Controllers\DocumentChatController;
 use App\Http\Controllers\DocumentController;
+use App\Http\Controllers\EmailDiscoveryController;
+use App\Http\Controllers\GmailAuthController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\QueueController;
 use App\Http\Controllers\VersionComparisonController;
@@ -98,6 +100,20 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::post('queue/worker/start', [QueueController::class, 'startWorker'])->name('queue.worker.start');
     Route::post('queue/worker/stop', [QueueController::class, 'stopWorker'])->name('queue.worker.stop');
     Route::post('queue/worker/restart', [QueueController::class, 'restartWorker'])->name('queue.worker.restart');
+
+    // Gmail OAuth routes
+    Route::get('gmail/connect', [GmailAuthController::class, 'redirect'])->name('gmail.connect');
+    Route::get('gmail/callback', [GmailAuthController::class, 'callback'])->name('gmail.callback');
+    Route::post('gmail/disconnect', [GmailAuthController::class, 'disconnect'])->name('gmail.disconnect');
+    Route::get('gmail/status', [GmailAuthController::class, 'status'])->name('gmail.status');
+
+    // Email Discovery routes
+    Route::get('email-discovery', [EmailDiscoveryController::class, 'index'])->name('email-discovery.index');
+    Route::post('email-discovery/scan', [EmailDiscoveryController::class, 'scan'])->name('email-discovery.scan');
+    Route::get('email-discovery/status', [EmailDiscoveryController::class, 'status'])->name('email-discovery.status');
+    Route::post('email-discovery/import', [EmailDiscoveryController::class, 'import'])->name('email-discovery.import');
+    Route::post('email-discovery/{discovered}/dismiss', [EmailDiscoveryController::class, 'dismiss'])->name('email-discovery.dismiss');
+    Route::post('email-discovery/{discovered}/import', [EmailDiscoveryController::class, 'importSingle'])->name('email-discovery.import-single');
 });
 
 require __DIR__.'/settings.php';

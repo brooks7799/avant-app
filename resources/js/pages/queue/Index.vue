@@ -20,6 +20,7 @@ import {
     Eye,
     Brain,
     StopCircle,
+    Mail,
 } from 'lucide-vue-next';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -105,6 +106,19 @@ interface DiffAnalysisJob {
     created_at: string;
 }
 
+interface EmailDiscoveryJob {
+    id: number;
+    user_email: string | null;
+    status: string;
+    emails_scanned: number;
+    companies_found: number;
+    error_message: string | null;
+    duration_ms: number | null;
+    started_at: string | null;
+    completed_at: string | null;
+    created_at: string;
+}
+
 interface Stats {
     pending_jobs: number;
     pending_analysis_jobs: number;
@@ -135,6 +149,7 @@ interface Props {
     recentDiscoveryJobs: DiscoveryJob[];
     recentAnalysisJobs: AnalysisJob[];
     recentDiffAnalysisJobs: DiffAnalysisJob[];
+    recentEmailDiscoveryJobs: EmailDiscoveryJob[];
     workerStatus: WorkerStatus;
 }
 
@@ -144,7 +159,7 @@ const showStopDialog = ref(false);
 const showClearDialog = ref(false);
 const isRefreshing = ref(false);
 const isWorkerActionPending = ref(false);
-const activeTab = ref<'scrape' | 'discovery' | 'analysis'>('scrape');
+const activeTab = ref<'scrape' | 'discovery' | 'analysis' | 'email'>('scrape');
 const displayUptime = ref(props.workerStatus.uptime);
 
 // Filter state
@@ -189,6 +204,7 @@ const filteredScrapeJobs = computed(() => filterJobs(props.recentScrapeJobs));
 const filteredDiscoveryJobs = computed(() => filterJobs(props.recentDiscoveryJobs));
 const filteredAnalysisJobs = computed(() => filterJobs(props.recentAnalysisJobs));
 const filteredDiffAnalysisJobs = computed(() => filterJobs(props.recentDiffAnalysisJobs));
+const filteredEmailDiscoveryJobs = computed(() => filterJobs(props.recentEmailDiscoveryJobs));
 
 // Get all currently running jobs (pending or running status)
 const runningJobs = computed(() => {
@@ -244,6 +260,18 @@ const runningJobs = computed(() => {
         }
     }
 
+    for (const job of props.recentEmailDiscoveryJobs) {
+        if (job.status === 'pending' || job.status === 'running') {
+            jobs.push({
+                type: 'email',
+                id: job.id,
+                name: job.user_email || 'Email Scan',
+                status: job.status,
+                created_at: job.created_at,
+            });
+        }
+    }
+
     // Sort by created_at desc
     return jobs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 });
@@ -254,6 +282,7 @@ function getJobTypeLabel(type: string): string {
         case 'discovery': return 'Discovery';
         case 'analysis': return 'AI Analysis';
         case 'diff': return 'Diff Analysis';
+        case 'email': return 'Email Scan';
         default: return type;
     }
 }
@@ -262,6 +291,7 @@ function getJobLink(job: { type: string; id: number }): string {
     switch (job.type) {
         case 'scrape': return `/queue/scrape/${job.id}`;
         case 'discovery': return `/queue/discovery/${job.id}`;
+        case 'email': return `/email-discovery`;
         default: return '#';
     }
 }
@@ -292,11 +322,20 @@ function cancelJob(job: { type: string; id: number }, event: Event) {
 
 // Get counts for filter badges
 const getStatusCounts = computed(() => {
-    const jobs = activeTab.value === 'scrape'
-        ? props.recentScrapeJobs
-        : activeTab.value === 'discovery'
-            ? props.recentDiscoveryJobs
-            : props.recentAnalysisJobs;
+    let jobs: Array<{ status: string }>;
+    switch (activeTab.value) {
+        case 'scrape':
+            jobs = props.recentScrapeJobs;
+            break;
+        case 'discovery':
+            jobs = props.recentDiscoveryJobs;
+            break;
+        case 'email':
+            jobs = props.recentEmailDiscoveryJobs;
+            break;
+        default:
+            jobs = props.recentAnalysisJobs;
+    }
 
     return {
         all: jobs.length,
@@ -403,7 +442,7 @@ function refreshData(silent = false) {
         isRefreshing.value = true;
     }
     router.reload({
-        only: ['stats', 'recentScrapeJobs', 'recentDiscoveryJobs', 'recentAnalysisJobs', 'recentDiffAnalysisJobs', 'workerStatus'],
+        only: ['stats', 'recentScrapeJobs', 'recentDiscoveryJobs', 'recentAnalysisJobs', 'recentDiffAnalysisJobs', 'recentEmailDiscoveryJobs', 'workerStatus'],
         onFinish: () => {
             isRefreshing.value = false;
             syncUptime();
@@ -865,6 +904,18 @@ function formatRelativeTime(dateString: string): string {
                         {{ stats.pending_analysis_jobs + stats.pending_diff_analysis_jobs }}
                     </Badge>
                 </button>
+                <button
+                    :class="[
+                        'px-4 py-2 text-sm font-medium transition-colors cursor-pointer',
+                        activeTab === 'email'
+                            ? 'border-b-2 border-primary text-primary'
+                            : 'text-muted-foreground hover:text-foreground'
+                    ]"
+                    @click="activeTab = 'email'"
+                >
+                    <Mail class="mr-2 inline h-4 w-4" />
+                    Email Scans
+                </button>
             </div>
 
             <!-- Filter Bar -->
@@ -1206,6 +1257,75 @@ function formatRelativeTime(dateString: string): string {
                                         <span v-if="job.ai_tokens_used"> &middot; {{ job.ai_tokens_used.toLocaleString() }} tokens</span>
                                         <span v-if="job.ai_analysis_cost"> &middot; {{ formatCost(job.ai_analysis_cost) }}</span>
                                         <span v-if="job.impact_score_delta !== null"> &middot; Impact: {{ job.impact_score_delta > 0 ? '+' : '' }}{{ job.impact_score_delta }}</span>
+                                    </div>
+                                    <div v-if="job.error_message" class="text-xs text-red-500 truncate max-w-md">
+                                        {{ job.error_message }}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <Badge :variant="getStatusBadgeVariant(job.status)">
+                                    {{ job.status }}
+                                </Badge>
+                                <span class="text-xs text-muted-foreground whitespace-nowrap">
+                                    {{ formatRelativeTime(job.created_at) }}
+                                </span>
+                                <Eye class="h-4 w-4 text-muted-foreground" />
+                            </div>
+                        </Link>
+                    </div>
+                </CardContent>
+            </Card>
+
+            <!-- Email Discovery Jobs -->
+            <Card v-if="activeTab === 'email'">
+                <CardHeader>
+                    <CardTitle>Email Discovery Scans</CardTitle>
+                    <CardDescription>
+                        Showing {{ filteredEmailDiscoveryJobs.length }} of {{ recentEmailDiscoveryJobs.length }} scans
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <div v-if="filteredEmailDiscoveryJobs.length === 0" class="py-8 text-center text-muted-foreground">
+                        <Mail class="h-12 w-12 mx-auto mb-4 opacity-50" />
+                        <template v-if="recentEmailDiscoveryJobs.length === 0">
+                            <p>No email discovery scans yet.</p>
+                            <p class="text-sm mt-2">Go to Email Discovery and click "Scan Inbox" to start.</p>
+                        </template>
+                        <template v-else>
+                            <p>No scans match the current filters.</p>
+                        </template>
+                    </div>
+                    <div v-else class="space-y-2">
+                        <Link
+                            v-for="job in filteredEmailDiscoveryJobs"
+                            :key="job.id"
+                            href="/email-discovery"
+                            class="flex items-center justify-between rounded-lg border p-3 hover:bg-muted/50 transition-colors cursor-pointer"
+                        >
+                            <div class="flex items-center gap-3">
+                                <component
+                                    :is="getStatusIcon(job.status)"
+                                    class="h-5 w-5"
+                                    :class="[
+                                        getStatusColor(job.status),
+                                        job.status === 'running' ? 'animate-spin' : ''
+                                    ]"
+                                />
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <span class="font-medium">{{ job.user_email || 'Email Scan' }}</span>
+                                        <Badge
+                                            v-if="job.status === 'completed'"
+                                            variant="secondary"
+                                            class="text-xs"
+                                        >
+                                            {{ job.companies_found }} companies
+                                        </Badge>
+                                    </div>
+                                    <div class="text-xs text-muted-foreground">
+                                        {{ job.emails_scanned }} emails scanned
+                                        <span v-if="job.duration_ms"> &middot; {{ formatDuration(job.duration_ms) }}</span>
                                     </div>
                                     <div v-if="job.error_message" class="text-xs text-red-500 truncate max-w-md">
                                         {{ job.error_message }}

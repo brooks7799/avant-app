@@ -9,6 +9,7 @@ use App\Jobs\ScrapeDocumentJob;
 use App\Models\AnalysisJob;
 use App\Models\AnalysisResult;
 use App\Models\DiscoveryJob;
+use App\Models\EmailDiscoveryJob;
 use App\Models\Document;
 use App\Models\DocumentType;
 use App\Models\DocumentVersion;
@@ -125,20 +126,40 @@ class QueueController extends Controller
                 'created_at' => $job->created_at->toISOString(),
             ]);
 
+        // Get recent email discovery jobs
+        $recentEmailDiscoveryJobs = EmailDiscoveryJob::with(['user'])
+            ->orderByDesc('created_at')
+            ->limit(20)
+            ->get()
+            ->map(fn ($job) => [
+                'id' => $job->id,
+                'user_email' => $job->user?->email,
+                'status' => $job->status,
+                'emails_scanned' => $job->emails_scanned,
+                'companies_found' => $job->companies_found,
+                'error_message' => $job->error_message,
+                'duration_ms' => $job->duration_ms,
+                'started_at' => $job->started_at?->toISOString(),
+                'completed_at' => $job->completed_at?->toISOString(),
+                'created_at' => $job->created_at->toISOString(),
+            ]);
+
         // Count pending job records (not just queue table)
         $pendingScrapeJobRecords = ScrapeJob::whereIn('status', ['pending', 'running'])->count();
         $pendingDiscoveryJobRecords = DiscoveryJob::whereIn('status', ['pending', 'running'])->count();
         $pendingAnalysisJobRecords = AnalysisJob::whereIn('status', ['pending', 'running'])->count();
         $pendingDiffAnalysisRecords = VersionComparisonAnalysis::whereIn('status', ['pending', 'processing'])->count();
+        $pendingEmailDiscoveryRecords = EmailDiscoveryJob::whereIn('status', ['pending', 'running'])->count();
 
         // Get statistics
         $stats = [
-            'pending_jobs' => $pendingJobs + $pendingScrapeJobRecords + $pendingDiscoveryJobRecords + $pendingAnalysisJobRecords + $pendingDiffAnalysisRecords,
+            'pending_jobs' => $pendingJobs + $pendingScrapeJobRecords + $pendingDiscoveryJobRecords + $pendingAnalysisJobRecords + $pendingDiffAnalysisRecords + $pendingEmailDiscoveryRecords,
             'pending_queue_jobs' => $pendingJobs,
             'pending_scrape_jobs' => $pendingScrapeJobRecords,
             'pending_discovery_jobs' => $pendingDiscoveryJobRecords,
             'pending_analysis_jobs' => $pendingAnalysisJobRecords,
             'pending_diff_analysis_jobs' => $pendingDiffAnalysisRecords,
+            'pending_email_discovery_jobs' => $pendingEmailDiscoveryRecords,
             'failed_jobs' => $failedJobs,
             'total_documents' => Document::count(),
             'monitored_documents' => Document::where('is_monitored', true)->where('is_active', true)->count(),
@@ -180,6 +201,7 @@ class QueueController extends Controller
             'recentDiscoveryJobs' => $recentDiscoveryJobs,
             'recentAnalysisJobs' => $recentAnalysisJobs,
             'recentDiffAnalysisJobs' => $recentDiffAnalysisJobs,
+            'recentEmailDiscoveryJobs' => $recentEmailDiscoveryJobs,
             'workerStatus' => $workerStatus,
         ]);
     }
@@ -195,6 +217,7 @@ class QueueController extends Controller
         // Get running jobs
         $runningScrapeJobs = ScrapeJob::where('status', 'running')->count();
         $runningDiscoveryJobs = DiscoveryJob::where('status', 'running')->count();
+        $runningEmailDiscoveryJobs = EmailDiscoveryJob::where('status', 'running')->count();
 
         // Recent activity
         $recentCompleted = ScrapeJob::where('status', 'completed')
@@ -206,6 +229,7 @@ class QueueController extends Controller
             'failed_jobs' => $failedJobs,
             'running_scrape_jobs' => $runningScrapeJobs,
             'running_discovery_jobs' => $runningDiscoveryJobs,
+            'running_email_discovery_jobs' => $runningEmailDiscoveryJobs,
             'recent_completed' => $recentCompleted,
             'worker_status' => $this->getWorkerStatus(),
             'timestamp' => now()->toISOString(),
@@ -298,6 +322,9 @@ class QueueController extends Controller
             $job->website?->update(['discovery_status' => 'pending']);
         }
         DiscoveryJob::whereIn('status', ['pending', 'running'])->delete();
+
+        // Delete pending email discovery jobs
+        EmailDiscoveryJob::whereIn('status', ['pending', 'running'])->delete();
 
         return redirect()->back()->with('success', "Cleared {$pendingCount} queue jobs and removed pending job records.");
     }
@@ -815,9 +842,9 @@ class QueueController extends Controller
 
         // Start the queue worker in the background
         // Using escapeshellarg for paths with spaces
-        // Process all queues: default, scraping, discovery, and ai
+        // Process all queues: default, scraping, discovery, ai, and email-discovery
         $command = sprintf(
-            'nohup php %s queue:work --queue=default,scraping,discovery,ai --sleep=3 --tries=3 --timeout=1800 --max-time=3600 > %s 2>&1 & echo $!',
+            'nohup php %s queue:work --queue=default,scraping,discovery,ai,email-discovery --sleep=3 --tries=3 --timeout=1800 --max-time=3600 > %s 2>&1 & echo $!',
             escapeshellarg($artisan),
             escapeshellarg($logFile)
         );

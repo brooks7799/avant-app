@@ -14,7 +14,7 @@ import {
 import { dashboard } from '@/routes';
 import { type NavItem } from '@/types';
 import { Link } from '@inertiajs/vue3';
-import { BookOpen, Building2, Folder, LayoutGrid, ListTodo } from 'lucide-vue-next';
+import { BookOpen, Building2, Folder, LayoutGrid, ListTodo, Mail } from 'lucide-vue-next';
 import AppLogo from './AppLogo.vue';
 
 const mainNavItems: NavItem[] = [
@@ -32,6 +32,11 @@ const mainNavItems: NavItem[] = [
         title: 'Queue Manager',
         href: '/queue',
         icon: ListTodo,
+    },
+    {
+        title: 'Email Discovery',
+        href: '/email-discovery',
+        icon: Mail,
     },
 ];
 
