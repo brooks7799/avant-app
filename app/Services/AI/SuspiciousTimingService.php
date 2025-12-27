@@ -10,10 +10,12 @@ class SuspiciousTimingService
 {
     /**
      * Evaluate timing of a document version update for suspicious patterns.
+     * Uses the document's effective date if available, otherwise falls back to scraped_at.
      */
     public function evaluate(DocumentVersion $version, ?int $impactDelta = null): array
     {
-        $timestamp = $version->scraped_at ?? $version->created_at;
+        // Prefer the document's stated effective date over our scrape date
+        $timestamp = $this->getEffectiveDate($version);
 
         if (! $timestamp) {
             return [
@@ -224,6 +226,26 @@ class SuspiciousTimingService
             'christmas_day' => 'Christmas Day',
             default => str_replace('_', ' ', ucfirst($key)),
         };
+    }
+
+    /**
+     * Get the effective date from a document version.
+     * Prefers the document's stated effective date, falls back to scraped_at.
+     */
+    protected function getEffectiveDate(DocumentVersion $version): ?Carbon
+    {
+        // Check if there's an effective date in metadata
+        $metadata = $version->metadata ?? [];
+        if (isset($metadata['effective_date']['value'])) {
+            try {
+                return Carbon::parse($metadata['effective_date']['value']);
+            } catch (\Exception $e) {
+                // Invalid date format, fall through
+            }
+        }
+
+        // Fall back to scraped_at or created_at
+        return $version->scraped_at ?? $version->created_at;
     }
 
     /**

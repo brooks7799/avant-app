@@ -354,7 +354,7 @@ function formatHeaderValue(value: string | string[]): string {
                     <CardDescription>Real-time progress updates from the retrieval job</CardDescription>
                 </CardHeader>
                 <CardContent>
-                    <ProgressLog :entries="job.progress_log" :auto-scroll="true" />
+                    <ProgressLog :entries="job.progress_log" />
                 </CardContent>
             </Card>
 

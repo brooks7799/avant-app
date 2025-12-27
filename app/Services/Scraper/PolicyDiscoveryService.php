@@ -12,7 +12,10 @@ use Illuminate\Support\Str;
 class PolicyDiscoveryService
 {
     protected array $commonPaths;
-    protected array $policyKeywords;
+    protected array $policyUrlPatterns;
+    protected array $policyLinkKeywords;
+    protected array $excludedUrlPatterns;
+    protected array $excludedLanguagePatterns;
     protected array $typePatterns;
     protected int $maxDepth;
     protected int $maxPages;
@@ -23,10 +26,13 @@ class PolicyDiscoveryService
         protected BrowserRendererService $browserRenderer,
     ) {
         $this->commonPaths = config('scraper.discovery.common_paths', []);
-        $this->policyKeywords = config('scraper.discovery.policy_keywords', []);
+        $this->policyUrlPatterns = config('scraper.discovery.policy_url_patterns', []);
+        $this->policyLinkKeywords = config('scraper.discovery.policy_link_keywords', []);
+        $this->excludedUrlPatterns = config('scraper.discovery.excluded_url_patterns', []);
+        $this->excludedLanguagePatterns = config('scraper.discovery.excluded_language_patterns', []);
         $this->typePatterns = config('scraper.discovery.type_patterns', []);
-        $this->maxDepth = config('scraper.discovery.max_depth', 3);
-        $this->maxPages = config('scraper.discovery.max_pages', 100);
+        $this->maxDepth = config('scraper.discovery.max_depth', 2);
+        $this->maxPages = config('scraper.discovery.max_pages', 50);
     }
 
     /**
@@ -94,6 +100,19 @@ class PolicyDiscoveryService
     }
 
     /**
+     * Update job counters in real-time.
+     */
+    protected function updateJobProgress(?DiscoveryJob $job, int $urlsCrawled, int $policiesFound): void
+    {
+        if ($job) {
+            $job->update([
+                'urls_crawled' => $urlsCrawled,
+                'policies_found' => $policiesFound,
+            ]);
+        }
+    }
+
+    /**
      * Discover policy documents on a website.
      */
     public function discover(Website $website, ?DiscoveryJob $job = null): DiscoveryResult
@@ -125,6 +144,7 @@ class PolicyDiscoveryService
                     $discoveredPolicies[$normalizedUrl] = $policy;
                 }
             }
+            $this->updateJobProgress($job, $urlsCrawled, count($discoveredPolicies));
 
             // 3. Check common paths
             $job?->logInfo('Checking common policy paths...');
@@ -136,6 +156,7 @@ class PolicyDiscoveryService
                     $discoveredPolicies[$normalizedUrl] = $policy;
                 }
             }
+            $this->updateJobProgress($job, $urlsCrawled, count($discoveredPolicies));
 
             // 4. Crawl homepage for links
             $job?->logInfo('Crawling homepage for policy links...');
@@ -147,6 +168,7 @@ class PolicyDiscoveryService
                     $discoveredPolicies[$normalizedUrl] = $policy;
                 }
             }
+            $this->updateJobProgress($job, $urlsCrawled, count($discoveredPolicies));
 
             // Convert to array
             $policies = array_map(fn ($p) => $p->toArray(), array_values($discoveredPolicies));
@@ -268,7 +290,14 @@ class PolicyDiscoveryService
             $result['all'] = array_merge($result['all'], $urls);
 
             // Check each URL for policy keywords
+            $excludedCount = 0;
             foreach ($urls as $url) {
+                // Skip excluded URLs first
+                if ($this->isExcludedUrl($url)) {
+                    $excludedCount++;
+                    continue;
+                }
+
                 if ($this->isPolicyUrl($url)) {
                     $type = $this->detectDocumentType($url);
                     $result['policies'][] = new DiscoveredPolicy(
@@ -282,45 +311,97 @@ class PolicyDiscoveryService
                     $job?->logSuccess("Found policy in sitemap: {$typeLabel} at {$url}", ['url' => $url, 'type' => $typeLabel]);
                 }
             }
+
+            if ($excludedCount > 0) {
+                $job?->logInfo("Filtered out {$excludedCount} non-policy URLs from sitemap");
+            }
         }
 
         return $result;
     }
 
     /**
-     * Parse sitemap XML and extract URLs.
+     * Parse sitemap XML and extract policy-related URLs only.
+     * Uses regex instead of DOM to avoid memory issues with large sitemaps.
+     * Only extracts URLs that match policy patterns.
      */
-    protected function parseSitemapXml(string $xml): array
+    protected function parseSitemapXml(string $xml, int $depth = 0): array
     {
         $urls = [];
+        $maxPolicyUrls = 50; // We only care about policy URLs
+        $maxSitemapDepth = 1; // Limit recursion to avoid memory issues
+
+        // Quick check - if XML is too large (>5MB), skip to avoid memory issues
+        if (strlen($xml) > 5 * 1024 * 1024) {
+            return $urls;
+        }
 
         try {
-            $doc = new \DOMDocument();
-            @$doc->loadXML($xml);
+            // Handle sitemap index - look for nested sitemaps
+            if ($depth < $maxSitemapDepth && str_contains($xml, '<sitemap>')) {
+                // Only look for sitemaps that might contain policy pages
+                // e.g., "sitemap-legal", "sitemap-pages", etc.
+                $policyRelatedPatterns = ['legal', 'policy', 'policies', 'pages', 'misc', 'other'];
 
-            // Handle sitemap index
-            $sitemaps = $doc->getElementsByTagName('sitemap');
-            foreach ($sitemaps as $sitemap) {
-                $loc = $sitemap->getElementsByTagName('loc')->item(0);
-                if ($loc) {
-                    // Recursively fetch sub-sitemaps (limited)
-                    $subContent = $this->httpClient->fetchSitemap($loc->textContent);
-                    if ($subContent) {
-                        $urls = array_merge($urls, $this->parseSitemapXml($subContent));
+                preg_match_all('/<loc>\s*([^<]+)\s*<\/loc>/i', $xml, $matches);
+                $sitemapCount = 0;
+                $maxSubSitemaps = 3;
+
+                foreach ($matches[1] ?? [] as $sitemapUrl) {
+                    if ($sitemapCount >= $maxSubSitemaps || count($urls) >= $maxPolicyUrls) {
+                        break;
+                    }
+
+                    $sitemapUrl = trim($sitemapUrl);
+
+                    // Skip non-English/regional sitemaps
+                    if ($this->isExcludedUrl($sitemapUrl)) {
+                        continue;
+                    }
+
+                    // Prioritize policy-related sitemaps
+                    $isPolicyRelated = false;
+                    foreach ($policyRelatedPatterns as $pattern) {
+                        if (stripos($sitemapUrl, $pattern) !== false) {
+                            $isPolicyRelated = true;
+                            break;
+                        }
+                    }
+
+                    // Only fetch policy-related sub-sitemaps or first 3
+                    if ($isPolicyRelated || $sitemapCount < 3) {
+                        $subContent = $this->httpClient->fetchSitemap($sitemapUrl);
+                        if ($subContent) {
+                            $subUrls = $this->parseSitemapXml($subContent, $depth + 1);
+                            $urls = array_merge($urls, $subUrls);
+                            $sitemapCount++;
+                        }
                     }
                 }
             }
 
-            // Handle regular sitemap
-            $urlNodes = $doc->getElementsByTagName('url');
-            foreach ($urlNodes as $urlNode) {
-                $loc = $urlNode->getElementsByTagName('loc')->item(0);
-                if ($loc) {
-                    $urls[] = $loc->textContent;
+            // Extract URLs using regex (much faster than DOM for large files)
+            preg_match_all('/<loc>\s*([^<]+)\s*<\/loc>/i', $xml, $matches);
+
+            foreach ($matches[1] ?? [] as $url) {
+                if (count($urls) >= $maxPolicyUrls) {
+                    break;
+                }
+
+                $url = trim($url);
+
+                // Skip if excluded
+                if ($this->isExcludedUrl($url)) {
+                    continue;
+                }
+
+                // Only keep URLs that look like policy pages
+                if ($this->isPolicyUrl($url)) {
+                    $urls[] = $url;
                 }
             }
         } catch (\Exception $e) {
-            // XML parsing failed
+            // Parsing failed - continue without sitemap data
         }
 
         return array_unique($urls);
@@ -423,14 +504,45 @@ class PolicyDiscoveryService
     }
 
     /**
+     * Check if a URL should be excluded based on patterns.
+     */
+    protected function isExcludedUrl(string $url): bool
+    {
+        $url = strtolower($url);
+
+        // Check excluded URL patterns (product pages, categories, etc.)
+        foreach ($this->excludedUrlPatterns as $pattern) {
+            if (str_contains($url, strtolower($pattern))) {
+                return true;
+            }
+        }
+
+        // Check non-English language patterns
+        foreach ($this->excludedLanguagePatterns as $pattern) {
+            if (str_contains($url, strtolower($pattern))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Check if a URL looks like a policy URL.
+     * More restrictive - requires matching specific policy path patterns.
      */
     protected function isPolicyUrl(string $url): bool
     {
         $url = strtolower($url);
 
-        foreach ($this->policyKeywords as $keyword) {
-            if (str_contains($url, $keyword)) {
+        // First check if URL should be excluded
+        if ($this->isExcludedUrl($url)) {
+            return false;
+        }
+
+        // Check if URL matches any policy URL pattern
+        foreach ($this->policyUrlPatterns as $pattern) {
+            if (str_contains($url, strtolower($pattern))) {
                 return true;
             }
         }
@@ -440,13 +552,15 @@ class PolicyDiscoveryService
 
     /**
      * Check if link text suggests a policy link.
+     * More restrictive - requires matching specific phrases.
      */
     protected function isPolicyLinkText(string $text): bool
     {
-        $text = strtolower($text);
+        $text = strtolower(trim($text));
 
-        foreach ($this->policyKeywords as $keyword) {
-            if (str_contains($text, $keyword)) {
+        // Must match one of the specific policy link keywords
+        foreach ($this->policyLinkKeywords as $keyword) {
+            if (str_contains($text, strtolower($keyword))) {
                 return true;
             }
         }

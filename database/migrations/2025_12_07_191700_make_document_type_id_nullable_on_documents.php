@@ -16,10 +16,13 @@ return new class extends Migration
         // Drop the unique constraint
         DB::statement('ALTER TABLE documents DROP INDEX documents_company_id_document_type_id_source_url_unique');
 
+        // Drop existing foreign key first
+        DB::statement('ALTER TABLE documents DROP FOREIGN KEY documents_document_type_id_foreign');
+
         // Make document_type_id nullable
         DB::statement('ALTER TABLE documents MODIFY document_type_id BIGINT UNSIGNED NULL');
 
-        // Re-add the foreign key for document_type_id
+        // Re-add the foreign key for document_type_id with SET NULL
         DB::statement('ALTER TABLE documents ADD CONSTRAINT documents_document_type_id_foreign FOREIGN KEY (document_type_id) REFERENCES document_types(id) ON DELETE SET NULL');
 
         // Add new unique constraint on company_id and source_url only

@@ -41,9 +41,21 @@ class QueueController extends Controller
         $failedJobs = DB::table('failed_jobs')->count();
         $workerStatus = $this->getWorkerStatus();
 
-        // Get recent scrape jobs
+        // Get recent scrape jobs - ordered by: running first, then pending (oldest first), then completed/failed (newest first)
         $recentScrapeJobs = ScrapeJob::with(['document.company', 'document.documentType'])
-            ->orderByDesc('created_at')
+            ->orderByRaw("CASE
+                WHEN status = 'running' THEN 0
+                WHEN status = 'pending' THEN 1
+                ELSE 2
+            END")
+            ->orderByRaw("CASE
+                WHEN status IN ('running', 'pending') THEN created_at
+                ELSE NULL
+            END ASC")
+            ->orderByRaw("CASE
+                WHEN status NOT IN ('running', 'pending') THEN created_at
+                ELSE NULL
+            END DESC")
             ->limit(50)
             ->get()
             ->map(fn ($job) => [
@@ -60,9 +72,21 @@ class QueueController extends Controller
                 'created_at' => $job->created_at->toISOString(),
             ]);
 
-        // Get recent discovery jobs
+        // Get recent discovery jobs - ordered by: running first, then pending (oldest first), then completed/failed (newest first)
         $recentDiscoveryJobs = DiscoveryJob::with(['website.company'])
-            ->orderByDesc('created_at')
+            ->orderByRaw("CASE
+                WHEN status = 'running' THEN 0
+                WHEN status = 'pending' THEN 1
+                ELSE 2
+            END")
+            ->orderByRaw("CASE
+                WHEN status IN ('running', 'pending') THEN created_at
+                ELSE NULL
+            END ASC")
+            ->orderByRaw("CASE
+                WHEN status NOT IN ('running', 'pending') THEN created_at
+                ELSE NULL
+            END DESC")
             ->limit(50)
             ->get()
             ->map(fn ($job) => [
@@ -450,6 +474,12 @@ class QueueController extends Controller
      */
     private function formatDiscoveryJobDetail(DiscoveryJob $job): array
     {
+        // Compute live duration for running jobs
+        $durationMs = $job->duration_ms;
+        if (in_array($job->status, ['pending', 'running']) && $job->started_at) {
+            $durationMs = (int) abs(now()->diffInMilliseconds($job->started_at));
+        }
+
         return [
             'id' => $job->id,
             'website_id' => $job->website_id,
@@ -457,14 +487,14 @@ class QueueController extends Controller
             'company_name' => $job->website?->company?->name,
             'company_id' => $job->website?->company?->id,
             'status' => $job->status,
-            'urls_crawled' => $job->urls_crawled,
-            'policies_found' => $job->policies_found,
+            'urls_crawled' => $job->urls_crawled ?? 0,
+            'policies_found' => $job->policies_found ?? 0,
             'discovered_urls' => $job->discovered_urls,
             'progress_log' => $job->progress_log ?? [],
             'error_message' => $job->error_message,
             'started_at' => $job->started_at?->toISOString(),
             'completed_at' => $job->completed_at?->toISOString(),
-            'duration_ms' => $job->duration_ms,
+            'duration_ms' => $durationMs,
             'created_at' => $job->created_at->toISOString(),
         ];
     }
@@ -840,29 +870,43 @@ class QueueController extends Controller
         $logFile = storage_path('logs/queue-worker.log');
         $artisan = base_path('artisan');
 
-        // Start the queue worker in the background
+        // Start multiple queue workers in the background for parallel processing
         // Using escapeshellarg for paths with spaces
         // Process all queues: default, scraping, discovery, ai, and email-discovery
-        $command = sprintf(
-            'nohup php %s queue:work --queue=default,scraping,discovery,ai,email-discovery --sleep=3 --tries=3 --timeout=1800 --max-time=3600 > %s 2>&1 & echo $!',
-            escapeshellarg($artisan),
-            escapeshellarg($logFile)
-        );
+        // Memory limit set to 1GB to handle large sitemap parsing
+        // 8 workers to take advantage of multi-core CPUs (e.g., Intel Ultra 9)
+        $workerCount = (int) env('QUEUE_WORKER_COUNT', 8);
+        $pids = [];
 
-        $result = Process::run($command);
-        $pid = trim($result->output());
+        for ($i = 1; $i <= $workerCount; $i++) {
+            $workerLogFile = storage_path("logs/queue-worker-{$i}.log");
+            $command = sprintf(
+                'nohup php -d memory_limit=1G %s queue:work --queue=default,scraping,discovery,ai,email-discovery --sleep=3 --tries=3 --timeout=1800 --max-time=3600 --memory=1024 > %s 2>&1 & echo $!',
+                escapeshellarg($artisan),
+                escapeshellarg($workerLogFile)
+            );
 
-        if (is_numeric($pid)) {
-            file_put_contents($pidFile, $pid);
-            Cache::put(self::WORKER_PID_KEY, (int) $pid, now()->addDay());
+            $result = Process::run($command);
+            $workerPid = trim($result->output());
+
+            if (is_numeric($workerPid)) {
+                $pids[] = (int) $workerPid;
+            }
+        }
+
+        if (!empty($pids)) {
+            // Store all PIDs
+            file_put_contents($pidFile, implode(',', $pids));
+            Cache::put(self::WORKER_PID_KEY, $pids, now()->addDay());
 
             // Also start the scheduler in the background (handles stuck job cleanup)
             $this->startScheduler();
 
-            return redirect()->back()->with('success', 'Queue worker and scheduler started successfully.');
+            $count = count($pids);
+            return redirect()->back()->with('success', "Started {$count} queue workers and scheduler successfully.");
         }
 
-        return redirect()->back()->with('error', 'Failed to start queue worker.');
+        return redirect()->back()->with('error', 'Failed to start queue workers.');
     }
 
     /**
@@ -950,7 +994,7 @@ class QueueController extends Controller
     }
 
     /**
-     * Stop the queue worker
+     * Stop all queue workers
      */
     public function stopWorker(): RedirectResponse
     {
@@ -960,22 +1004,27 @@ class QueueController extends Controller
             // Clean up stale PID file
             $this->cleanupPidFile();
 
-            return redirect()->back()->with('info', 'Queue worker is not running.');
+            return redirect()->back()->with('info', 'Queue workers are not running.');
         }
 
-        $pid = $workerStatus['pid'];
+        $pids = $workerStatus['pids'] ?? [];
+        $stoppedCount = 0;
 
-        // Send SIGTERM to gracefully stop the worker
-        Process::run("kill -15 {$pid}");
+        foreach ($pids as $pid) {
+            // Send SIGTERM to gracefully stop the worker
+            Process::run("kill -15 {$pid} 2>/dev/null");
+            $stoppedCount++;
+        }
 
-        // Give it a moment to stop gracefully
+        // Give them a moment to stop gracefully
         sleep(1);
 
-        // Check if it's still running
-        $checkResult = Process::run("ps -p {$pid}");
-        if ($checkResult->successful() && str_contains($checkResult->output(), (string) $pid)) {
-            // Force kill if still running
-            Process::run("kill -9 {$pid}");
+        // Force kill any that are still running
+        foreach ($pids as $pid) {
+            $checkResult = Process::run("ps -p {$pid} --no-headers 2>/dev/null");
+            if ($checkResult->successful() && !empty(trim($checkResult->output()))) {
+                Process::run("kill -9 {$pid} 2>/dev/null");
+            }
         }
 
         $this->cleanupPidFile();
@@ -983,7 +1032,7 @@ class QueueController extends Controller
         // Also stop the scheduler
         $this->stopScheduler();
 
-        return redirect()->back()->with('success', 'Queue worker and scheduler stopped.');
+        return redirect()->back()->with('success', "Stopped {$stoppedCount} queue workers and scheduler.");
     }
 
     /**
@@ -1002,61 +1051,79 @@ class QueueController extends Controller
      */
     private function getWorkerStatus(): array
     {
-        $pid = $this->getWorkerPid();
+        $pids = $this->getWorkerPids();
 
-        if (!$pid) {
+        if (empty($pids)) {
             return [
                 'running' => false,
-                'pid' => null,
-                'started_at' => null,
+                'pids' => [],
+                'worker_count' => 0,
+                'uptime' => null,
             ];
         }
 
-        // Check if the process is actually running
-        $result = Process::run("ps -p {$pid} -o pid,etime,comm --no-headers");
+        // Check which processes are actually running
+        $runningPids = [];
+        $uptime = null;
 
-        if (!$result->successful() || empty(trim($result->output()))) {
+        foreach ($pids as $pid) {
+            $result = Process::run("ps -p {$pid} -o pid,etime,comm --no-headers 2>/dev/null");
+
+            if ($result->successful() && !empty(trim($result->output()))) {
+                $runningPids[] = $pid;
+
+                // Get uptime from first running worker
+                if (!$uptime) {
+                    $output = trim($result->output());
+                    $parts = preg_split('/\s+/', $output);
+                    $uptime = $parts[1] ?? null;
+                }
+            }
+        }
+
+        if (empty($runningPids)) {
             $this->cleanupPidFile();
 
             return [
                 'running' => false,
-                'pid' => null,
-                'started_at' => null,
+                'pids' => [],
+                'worker_count' => 0,
+                'uptime' => null,
             ];
         }
 
-        // Parse the output to get uptime
-        $output = trim($result->output());
-        $parts = preg_split('/\s+/', $output);
-        $uptime = $parts[1] ?? null;
-
         return [
             'running' => true,
-            'pid' => $pid,
+            'pids' => $runningPids,
+            'worker_count' => count($runningPids),
             'uptime' => $uptime,
         ];
     }
 
     /**
-     * Get the worker PID from file or cache
+     * Get the worker PIDs from file or cache
      */
-    private function getWorkerPid(): ?int
+    private function getWorkerPids(): array
     {
         // Try cache first
-        $pid = Cache::get(self::WORKER_PID_KEY);
+        $pids = Cache::get(self::WORKER_PID_KEY);
 
-        if (!$pid) {
+        if (!$pids) {
             // Try file
             $pidFile = $this->getPidFilePath();
             if (file_exists($pidFile)) {
-                $pid = (int) trim(file_get_contents($pidFile));
-                if ($pid > 0) {
-                    Cache::put(self::WORKER_PID_KEY, $pid, now()->addDay());
+                $content = trim(file_get_contents($pidFile));
+                if (!empty($content)) {
+                    $pids = array_map('intval', explode(',', $content));
+                    $pids = array_filter($pids, fn($p) => $p > 0);
+                    if (!empty($pids)) {
+                        Cache::put(self::WORKER_PID_KEY, $pids, now()->addDay());
+                    }
                 }
             }
         }
 
-        return $pid ?: null;
+        return $pids ?: [];
     }
 
     /**

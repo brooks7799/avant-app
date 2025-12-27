@@ -57,10 +57,13 @@ class CompanyExtractorService
             'confidence_score' => $confidence,
             'email_metadata' => [
                 'subject' => $subject,
+                'from' => $fromHeader,
                 'date' => $email['date'] ?? null,
                 'snippet' => $email['snippet'] ?? null,
+                'body_html' => $body,
             ],
             'detected_policy_urls' => $policyUrls,
+            'gmail_message_id' => $email['id'] ?? null,
         ];
     }
 

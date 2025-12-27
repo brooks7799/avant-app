@@ -112,6 +112,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::post('email-discovery/scan', [EmailDiscoveryController::class, 'scan'])->name('email-discovery.scan');
     Route::get('email-discovery/status', [EmailDiscoveryController::class, 'status'])->name('email-discovery.status');
     Route::post('email-discovery/import', [EmailDiscoveryController::class, 'import'])->name('email-discovery.import');
+    Route::get('email-discovery/{discovered}', [EmailDiscoveryController::class, 'show'])->name('email-discovery.show');
     Route::post('email-discovery/{discovered}/dismiss', [EmailDiscoveryController::class, 'dismiss'])->name('email-discovery.dismiss');
     Route::post('email-discovery/{discovered}/import', [EmailDiscoveryController::class, 'importSingle'])->name('email-discovery.import-single');
 });

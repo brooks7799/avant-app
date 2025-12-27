@@ -277,7 +277,7 @@ function formatDocumentType(type: string | null): string {
                     <CardDescription>Real-time progress updates from the discovery job</CardDescription>
                 </CardHeader>
                 <CardContent>
-                    <ProgressLog :entries="job.progress_log" :auto-scroll="true" />
+                    <ProgressLog :entries="job.progress_log" />
                 </CardContent>
             </Card>
 

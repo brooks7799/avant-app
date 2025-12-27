@@ -95,6 +95,18 @@ PROMPT;
             'content_length' => strlen($content),
         ]);
 
+        // Pre-validate content to catch invalid/wrong pages
+        $contentValidation = $this->validateContentForAnalysis($content, $version);
+        if (!$contentValidation['valid']) {
+            Log::warning('Content validation failed, creating low-confidence analysis', [
+                'version_id' => $version->id,
+                'validation' => $contentValidation,
+            ]);
+
+            // Create a low-confidence analysis result with validation warning
+            return $this->createLowConfidenceResult($version, $contentValidation, $analysisType);
+        }
+
         // Step 1: Chunk the content
         $chunks = $this->chunkContent($content);
 
@@ -898,5 +910,169 @@ PROMPT;
             'low' => 4,
             default => 5,
         };
+    }
+
+    /**
+     * Validate content is suitable for analysis.
+     * Returns validation result with confidence indicators.
+     */
+    protected function validateContentForAnalysis(string $content, DocumentVersion $version): array
+    {
+        $wordCount = str_word_count($content);
+        $issues = [];
+        $confidence = 1.0;
+
+        $documentTypeSlug = $version->document?->documentType?->slug ?? '';
+
+        // Get minimum word counts from config
+        $minWordCounts = config('scraper.discovery.min_word_counts', []);
+        $minWords = $minWordCounts[$documentTypeSlug] ?? $minWordCounts['default'] ?? 300;
+
+        // Issue 1: Very low word count
+        if ($wordCount < 200) {
+            $issues[] = "Extremely low word count ({$wordCount} words) - likely not a complete policy document";
+            $confidence -= 0.5;
+        } elseif ($wordCount < $minWords) {
+            $issues[] = "Low word count ({$wordCount} words, expected at least {$minWords})";
+            $confidence -= 0.2;
+        }
+
+        // Issue 2: Check for legal document structure
+        $contentLower = strtolower($content);
+        $legalIndicators = [
+            'numbered sections' => preg_match_all('/\b(section\s*\d|article\s*\d|\d+\.\s+[A-Z])/i', $content),
+            'legal terms' => $this->countLegalTerms($contentLower),
+            'defined terms' => preg_match_all('/"[^"]+"\s+means|"[^"]+"\s+refers/i', $content),
+        ];
+
+        $hasLegalStructure = $legalIndicators['numbered sections'] >= 2 ||
+                            $legalIndicators['legal terms'] >= 5 ||
+                            $legalIndicators['defined terms'] >= 1;
+
+        if (!$hasLegalStructure && $wordCount < 1000) {
+            $issues[] = "Content lacks typical legal document structure (no numbered sections, few legal terms)";
+            $confidence -= 0.3;
+        }
+
+        // Issue 3: Content type keyword validation
+        $validationKeywords = config("scraper.discovery.content_validation_keywords.{$documentTypeSlug}", []);
+        if (!empty($validationKeywords)) {
+            $keywordMatches = 0;
+            foreach ($validationKeywords as $keyword) {
+                if (str_contains($contentLower, strtolower($keyword))) {
+                    $keywordMatches++;
+                }
+            }
+
+            $keywordRatio = $keywordMatches / count($validationKeywords);
+            if ($keywordMatches < 3 && $wordCount < 1000) {
+                $issues[] = "Few content keywords matched ({$keywordMatches}/" . count($validationKeywords) . ") - may not be a valid {$documentTypeSlug}";
+                $confidence -= 0.3;
+            }
+        }
+
+        // Issue 4: Homepage/marketing content indicators
+        $homepageIndicators = [
+            'sign up' => substr_count($contentLower, 'sign up'),
+            'get started' => substr_count($contentLower, 'get started'),
+            'learn more' => substr_count($contentLower, 'learn more'),
+            'shop now' => substr_count($contentLower, 'shop now'),
+            'subscribe' => substr_count($contentLower, 'subscribe'),
+        ];
+
+        $marketingScore = array_sum($homepageIndicators);
+        if ($marketingScore >= 5 && $wordCount < 500) {
+            $issues[] = "Content appears to be marketing/homepage copy rather than legal document";
+            $confidence -= 0.4;
+        }
+
+        $isValid = $confidence > 0.3;
+
+        return [
+            'valid' => $isValid,
+            'confidence' => max(0, round($confidence, 2)),
+            'word_count' => $wordCount,
+            'issues' => $issues,
+            'legal_indicators' => $legalIndicators,
+            'document_type' => $documentTypeSlug,
+        ];
+    }
+
+    /**
+     * Count common legal terms in content.
+     */
+    protected function countLegalTerms(string $contentLower): int
+    {
+        $legalTerms = [
+            'agreement', 'terms', 'conditions', 'privacy', 'policy',
+            'consent', 'liability', 'indemnify', 'warrant', 'disclaimer',
+            'arbitration', 'jurisdiction', 'governing law', 'terminate',
+            'personal information', 'data', 'collect', 'disclose', 'rights',
+        ];
+
+        $count = 0;
+        foreach ($legalTerms as $term) {
+            $count += substr_count($contentLower, $term);
+        }
+
+        return $count;
+    }
+
+    /**
+     * Create a low-confidence analysis result when content validation fails.
+     */
+    protected function createLowConfidenceResult(DocumentVersion $version, array $validation, string $analysisType): AnalysisResult
+    {
+        $issuesList = implode("\n- ", $validation['issues']);
+
+        $summary = "⚠️ **Low Confidence Analysis**\n\n" .
+            "The scraped content may not be a valid {$validation['document_type']} document. " .
+            "Only {$validation['word_count']} words were found.\n\n" .
+            "**Issues detected:**\n- {$issuesList}\n\n" .
+            "Please verify the source URL is correct and the page contains the expected policy document.";
+
+        $result = AnalysisResult::create([
+            'document_version_id' => $version->id,
+            'analysis_type' => $analysisType,
+            'overall_score' => 0, // No score for invalid content
+            'overall_rating' => 'Unknown',
+            'summary' => $summary,
+            'key_concerns' => "- ⚠️ **content_validation_failed**: Unable to verify this is a valid policy document. The scraped content appears to be wrong or incomplete.",
+            'positive_aspects' => null,
+            'recommendations' => "1. ⚠️ **Verify the URL** — Check that the document source URL points directly to the policy page\n" .
+                "2. 🔍 **Check for redirects** — The page may have redirected to a homepage or error page\n" .
+                "3. 📝 **Manual review needed** — Review the raw scraped content to understand what was captured",
+            'extracted_data' => [
+                'content_validation' => $validation,
+                'faq' => [],
+                'dimension_scores' => [],
+            ],
+            'flags' => [
+                'red' => [[
+                    'type' => 'content_validation_failed',
+                    'description' => "Content validation failed with confidence {$validation['confidence']}. " . implode('. ', $validation['issues']),
+                    'section_reference' => 'Pre-analysis',
+                    'severity' => 10,
+                ]],
+                'yellow' => [],
+                'green' => [],
+            ],
+            'behavioral_signals' => [],
+            'tags' => ['low-confidence', 'validation-failed'],
+            'model_used' => $this->llmClient->getModel(),
+            'tokens_used' => 0,
+            'analysis_cost' => 0,
+            'is_current' => true,
+            'processing_errors' => ['Content validation failed: ' . implode('; ', $validation['issues'])],
+        ]);
+
+        $result->markAsCurrent();
+
+        Log::info('Created low-confidence analysis result', [
+            'analysis_id' => $result->id,
+            'validation' => $validation,
+        ]);
+
+        return $result;
     }
 }

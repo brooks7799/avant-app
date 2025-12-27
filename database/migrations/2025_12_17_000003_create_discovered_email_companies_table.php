@@ -22,8 +22,9 @@ return new class extends Migration
             $table->float('confidence_score'); // 0.0 - 1.0
             $table->string('status')->default('pending'); // pending, imported, dismissed
             $table->foreignId('company_id')->nullable()->constrained()->nullOnDelete();
-            $table->json('email_metadata')->nullable(); // subject, date, snippet
+            $table->json('email_metadata')->nullable(); // subject, date, snippet, body_html
             $table->json('detected_policy_urls')->nullable();
+            $table->string('gmail_message_id')->nullable();
             $table->json('metadata')->nullable();
             $table->timestamps();
 

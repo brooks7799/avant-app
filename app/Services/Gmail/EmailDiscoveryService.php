@@ -82,6 +82,7 @@ class EmailDiscoveryService
                                         'confidence_score' => $companyData['confidence_score'],
                                         'email_metadata' => $companyData['email_metadata'],
                                         'detected_policy_urls' => $companyData['detected_policy_urls'],
+                                        'gmail_message_id' => $companyData['gmail_message_id'],
                                     ]);
 
                                     $discoveredDomains[$companyData['domain']] = true;

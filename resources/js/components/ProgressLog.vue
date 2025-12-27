@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick } from 'vue';
+import { computed } from 'vue';
 import {
     Info,
     CheckCircle2,
@@ -16,24 +16,12 @@ interface LogEntry {
 
 interface Props {
     entries: LogEntry[];
-    autoScroll?: boolean;
 }
 
-const props = withDefaults(defineProps<Props>(), {
-    autoScroll: true,
-});
+const props = defineProps<Props>();
 
-const logContainer = ref<HTMLElement | null>(null);
-
-watch(
-    () => props.entries.length,
-    async () => {
-        if (props.autoScroll && logContainer.value) {
-            await nextTick();
-            logContainer.value.scrollTop = logContainer.value.scrollHeight;
-        }
-    }
-);
+// Reverse entries so newest is at top
+const reversedEntries = computed(() => [...props.entries].reverse());
 
 function getIcon(type: string) {
     switch (type) {
@@ -101,7 +89,6 @@ function formatRelativeTime(dateString: string): string {
 
 <template>
     <div
-        ref="logContainer"
         class="max-h-96 overflow-y-auto rounded-lg border bg-muted/30 font-mono text-sm"
     >
         <div v-if="entries.length === 0" class="py-8 text-center text-muted-foreground">
@@ -109,7 +96,7 @@ function formatRelativeTime(dateString: string): string {
         </div>
         <div v-else class="space-y-0.5 p-2">
             <div
-                v-for="(entry, index) in entries"
+                v-for="(entry, index) in reversedEntries"
                 :key="index"
                 class="flex items-start gap-2 rounded px-2 py-1 hover:bg-muted/50"
             >

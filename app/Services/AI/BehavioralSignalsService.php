@@ -70,13 +70,13 @@ class BehavioralSignalsService
     public function analyzeVersion(DocumentVersion $version): array
     {
         $signals = [];
-        $updateDate = $version->scraped_at ?? $version->created_at;
+        $updateDate = $this->getEffectiveDate($version);
 
         if (!$updateDate) {
             return ['signals' => [], 'penalty' => 0, 'risk_score' => 0];
         }
 
-        $carbon = Carbon::parse($updateDate);
+        $carbon = $updateDate;
 
         // Check holiday timing
         $holidaySignal = $this->checkHolidayTiming($carbon);
@@ -621,5 +621,26 @@ class BehavioralSignalsService
             'major' => self::MAJOR_HOLIDAYS,
             'minor' => self::MINOR_HOLIDAYS,
         ];
+    }
+
+    /**
+     * Get the effective date from a document version.
+     * Prefers the document's stated effective date, falls back to scraped_at.
+     */
+    protected function getEffectiveDate(DocumentVersion $version): ?Carbon
+    {
+        // Check if there's an effective date in metadata
+        $metadata = $version->metadata ?? [];
+        if (isset($metadata['effective_date']['value'])) {
+            try {
+                return Carbon::parse($metadata['effective_date']['value']);
+            } catch (\Exception $e) {
+                // Invalid date format, fall through
+            }
+        }
+
+        // Fall back to scraped_at or created_at
+        $fallbackDate = $version->scraped_at ?? $version->created_at;
+        return $fallbackDate ? Carbon::parse($fallbackDate) : null;
     }
 }

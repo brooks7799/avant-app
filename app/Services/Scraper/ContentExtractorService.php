@@ -208,6 +208,216 @@ class ContentExtractorService
     }
 
     /**
+     * Extract policy links from footer BEFORE footer is removed.
+     * This captures links like "Privacy Policy", "Terms of Service" from the footer.
+     */
+    public function extractFooterPolicyLinks(string $html, string $baseUrl): array
+    {
+        $crawler = new Crawler($html);
+        $policyLinks = [];
+
+        // Policy link text patterns
+        $policyPatterns = config('scraper.discovery.policy_link_keywords', [
+            'privacy policy', 'privacy notice', 'terms of service', 'terms of use',
+            'terms and conditions', 'cookie policy', 'legal', 'ccpa',
+        ]);
+
+        // Footer selectors to check
+        $footerSelectors = ['footer', '.footer', '#footer', '[role="contentinfo"]'];
+
+        foreach ($footerSelectors as $selector) {
+            try {
+                $footerNodes = $crawler->filter($selector);
+                if ($footerNodes->count() === 0) continue;
+
+                $footerNodes->filter('a[href]')->each(function (Crawler $node) use (&$policyLinks, $baseUrl, $policyPatterns) {
+                    $href = $node->attr('href');
+                    $text = strtolower(trim($node->text()));
+
+                    if (!$href || strlen($text) < 3) return;
+
+                    // Check if link text matches policy patterns
+                    foreach ($policyPatterns as $pattern) {
+                        if (str_contains($text, strtolower($pattern))) {
+                            $absoluteUrl = $this->resolveUrl($href, $baseUrl);
+                            if ($absoluteUrl) {
+                                $policyLinks[] = [
+                                    'url' => $absoluteUrl,
+                                    'text' => trim($node->text()),
+                                    'pattern_matched' => $pattern,
+                                ];
+                            }
+                            return; // Found a match, don't check other patterns
+                        }
+                    }
+                });
+            } catch (\Exception $e) {
+                // Selector not found - continue
+            }
+        }
+
+        // Remove duplicates by URL
+        $seen = [];
+        return array_filter($policyLinks, function ($link) use (&$seen) {
+            if (isset($seen[$link['url']])) return false;
+            $seen[$link['url']] = true;
+            return true;
+        });
+    }
+
+    /**
+     * Check if page appears to be a homepage rather than a policy document.
+     * Returns array with 'is_homepage' bool and 'indicators' array of reasons.
+     */
+    public function detectHomepage(string $html, string $expectedUrl): array
+    {
+        $crawler = new Crawler($html);
+        $indicators = [];
+        $title = $this->extractTitle($html) ?? '';
+        $titleLower = strtolower($title);
+        $text = strip_tags($html);
+        $wordCount = str_word_count($text);
+
+        // Check 1: Page title doesn't contain policy keywords
+        $policyTitleKeywords = ['privacy', 'terms', 'policy', 'legal', 'cookie', 'ccpa', 'agreement'];
+        $hasPolicyTitle = false;
+        foreach ($policyTitleKeywords as $keyword) {
+            if (str_contains($titleLower, $keyword)) {
+                $hasPolicyTitle = true;
+                break;
+            }
+        }
+        if (!$hasPolicyTitle && !empty($title)) {
+            $indicators[] = "Page title '{$title}' doesn't mention policy/terms";
+        }
+
+        // Check 2: Very low word count (homepages are often visual with little text)
+        if ($wordCount < 300) {
+            $indicators[] = "Very low word count ({$wordCount} words)";
+        }
+
+        // Check 3: Multiple navigation menus (common on homepages)
+        try {
+            $navCount = $crawler->filter('nav')->count();
+            $navCount += $crawler->filter('[role="navigation"]')->count();
+            if ($navCount >= 3) {
+                $indicators[] = "Multiple navigation elements ({$navCount} found)";
+            }
+        } catch (\Exception $e) {}
+
+        // Check 4: Hero sections or carousels (homepage indicators)
+        try {
+            $heroIndicators = 0;
+            $heroSelectors = ['.hero', '.carousel', '.slider', '.banner', '[class*="hero"]', '[class*="carousel"]'];
+            foreach ($heroSelectors as $selector) {
+                if ($crawler->filter($selector)->count() > 0) {
+                    $heroIndicators++;
+                }
+            }
+            if ($heroIndicators >= 2) {
+                $indicators[] = "Homepage elements detected (hero/carousel/banner)";
+            }
+        } catch (\Exception $e) {}
+
+        // Check 5: URL path suggests policy but content doesn't match
+        $urlPath = strtolower(parse_url($expectedUrl, PHP_URL_PATH) ?? '');
+        $expectsPolicy = str_contains($urlPath, 'privacy') || str_contains($urlPath, 'terms') || str_contains($urlPath, 'legal');
+
+        if ($expectsPolicy) {
+            // Check if content has policy structure
+            $policyStructureIndicators = 0;
+            $textLower = strtolower($text);
+
+            // Check for section headers
+            if (preg_match_all('/\b(section|article|chapter)\s*\d/i', $text) >= 2) {
+                $policyStructureIndicators++;
+            }
+            // Check for legal terms
+            $legalTerms = ['agree', 'consent', 'liability', 'privacy', 'collect', 'data', 'terms', 'conditions'];
+            $foundTerms = 0;
+            foreach ($legalTerms as $term) {
+                if (str_contains($textLower, $term)) $foundTerms++;
+            }
+            if ($foundTerms >= 4) {
+                $policyStructureIndicators++;
+            }
+
+            if ($policyStructureIndicators === 0 && $wordCount < 500) {
+                $indicators[] = "URL suggests policy but content lacks legal structure";
+            }
+        }
+
+        // Determine if it's likely a homepage
+        $isHomepage = count($indicators) >= 2;
+
+        return [
+            'is_homepage' => $isHomepage,
+            'indicators' => $indicators,
+            'title' => $title,
+            'word_count' => $wordCount,
+        ];
+    }
+
+    /**
+     * Validate that content matches expected document type.
+     * Returns array with 'valid' bool, 'confidence' score, and 'details'.
+     */
+    public function validateContentType(string $text, string $documentTypeSlug): array
+    {
+        $textLower = strtolower($text);
+        $wordCount = str_word_count($text);
+
+        // Get validation keywords for this document type
+        $keywords = config("scraper.discovery.content_validation_keywords.{$documentTypeSlug}", []);
+        $minWords = config("scraper.discovery.min_word_counts.{$documentTypeSlug}",
+                          config('scraper.discovery.min_word_counts.default', 300));
+
+        // If no keywords configured, assume valid
+        if (empty($keywords)) {
+            return [
+                'valid' => true,
+                'confidence' => 0.5,
+                'keyword_matches' => 0,
+                'word_count' => $wordCount,
+                'min_words' => $minWords,
+                'details' => 'No validation keywords configured for this document type',
+            ];
+        }
+
+        // Count keyword matches
+        $matches = 0;
+        $foundKeywords = [];
+        foreach ($keywords as $keyword) {
+            if (str_contains($textLower, strtolower($keyword))) {
+                $matches++;
+                $foundKeywords[] = $keyword;
+            }
+        }
+
+        // Calculate confidence
+        $keywordRatio = $matches / count($keywords);
+        $wordCountOk = $wordCount >= $minWords;
+
+        // Valid if: >= 3 keyword matches OR (>= 2 matches AND word count OK)
+        $isValid = $matches >= 3 || ($matches >= 2 && $wordCountOk);
+
+        // Confidence: 0-1 based on matches and word count
+        $confidence = min(1.0, ($matches / 5) + ($wordCountOk ? 0.3 : 0));
+
+        return [
+            'valid' => $isValid,
+            'confidence' => round($confidence, 2),
+            'keyword_matches' => $matches,
+            'found_keywords' => $foundKeywords,
+            'word_count' => $wordCount,
+            'min_words' => $minWords,
+            'details' => $isValid
+                ? "Content appears valid for {$documentTypeSlug}"
+                : "Content may not be a valid {$documentTypeSlug} (only {$matches} keyword matches, {$wordCount} words)",
+        ];
+    }
+
+    /**
      * Detect if the page is a "table of contents" landing page.
      * These pages have minimal content and primarily consist of links to sections.
      */

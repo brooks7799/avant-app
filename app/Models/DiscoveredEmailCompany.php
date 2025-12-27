@@ -22,6 +22,7 @@ class DiscoveredEmailCompany extends Model
         'company_id',
         'email_metadata',
         'detected_policy_urls',
+        'gmail_message_id',
         'metadata',
     ];
 

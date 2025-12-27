@@ -139,7 +139,8 @@ interface Stats {
 
 interface WorkerStatus {
     running: boolean;
-    pid: number | null;
+    pids: number[];
+    worker_count: number;
     uptime: string | null;
 }
 
@@ -618,7 +619,7 @@ function formatRelativeTime(dateString: string): string {
                                 </h2>
                                 <p class="text-sm text-muted-foreground">
                                     <template v-if="workerStatus.running">
-                                        PID: {{ workerStatus.pid }}
+                                        {{ workerStatus.worker_count }} worker{{ workerStatus.worker_count !== 1 ? 's' : '' }} (1GB memory each)
                                         <span v-if="displayUptime"> &middot; Uptime: {{ displayUptime }}</span>
                                     </template>
                                     <template v-else>

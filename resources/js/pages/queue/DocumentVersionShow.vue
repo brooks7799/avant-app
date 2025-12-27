@@ -146,6 +146,19 @@ function formatDate(dateString: string | null): string {
 
 function formatDateOnly(dateString: string | null): string {
     if (!dateString) return 'Unknown';
+    // Parse date-only strings (YYYY-MM-DD) without timezone conversion
+    // to avoid off-by-one errors when displaying
+    const match = dateString.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (match) {
+        const [, year, month, day] = match;
+        const date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+        return date.toLocaleDateString('en-US', {
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+        });
+    }
+    // Fallback for full datetime strings
     return new Date(dateString).toLocaleDateString('en-US', {
         year: 'numeric',
         month: 'long',

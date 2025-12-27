@@ -239,6 +239,36 @@ class EmailDiscoveryController extends Controller
     }
 
     /**
+     * Show a single discovered company with email preview.
+     */
+    public function show(DiscoveredEmailCompany $discovered): Response
+    {
+        // Verify the company belongs to the current user
+        if ($discovered->user_id !== Auth::id()) {
+            abort(403);
+        }
+
+        return Inertia::render('email-discovery/Show', [
+            'discovered' => [
+                'id' => $discovered->id,
+                'name' => $discovered->name,
+                'domain' => $discovered->domain,
+                'email_address' => $discovered->email_address,
+                'detection_source' => $discovered->detection_source,
+                'detection_source_label' => $discovered->getDetectionSourceLabel(),
+                'confidence_score' => $discovered->confidence_score,
+                'confidence_level' => $discovered->getConfidenceLevel(),
+                'status' => $discovered->status,
+                'email_metadata' => $discovered->email_metadata,
+                'detected_policy_urls' => $discovered->detected_policy_urls,
+                'company_id' => $discovered->company_id,
+                'gmail_message_id' => $discovered->gmail_message_id,
+                'created_at' => $discovered->created_at->toISOString(),
+            ],
+        ]);
+    }
+
+    /**
      * Dismiss a discovered company.
      */
     public function dismiss(DiscoveredEmailCompany $discovered): RedirectResponse

@@ -117,7 +117,7 @@ class BrowserRendererService
         $options = array_merge([
             'browser' => $this->defaultBrowser,
             'timeout' => $this->defaultTimeout,
-            'waitUntil' => 'networkidle',
+            'waitUntil' => 'networkidle2',
             'userAgent' => config('scraper.browser.user_agent', null),
         ], $options);
 

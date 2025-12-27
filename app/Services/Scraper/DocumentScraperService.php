@@ -19,12 +19,33 @@ class DocumentScraperService
     }
 
     /**
+     * File extensions that cannot be scraped as HTML.
+     */
+    protected array $unsupportedExtensions = [
+        '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+        '.zip', '.rar', '.tar', '.gz', '.7z',
+        '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico',
+        '.mp4', '.mp3', '.avi', '.mov', '.wav',
+    ];
+
+    /**
      * Scrape a document and return the result.
      */
     public function scrape(Document $document, ?ScrapeJob $job = null): ScrapeResult
     {
         try {
             $job?->logInfo("Starting scrape for {$document->documentType?->name}");
+
+            // Check for unsupported file types before fetching
+            $unsupportedType = $this->detectUnsupportedFileType($document->source_url);
+            if ($unsupportedType) {
+                $job?->logError("Unsupported file type: {$unsupportedType}");
+                return ScrapeResult::failure(
+                    "Cannot scrape {$unsupportedType} files. Only HTML pages are supported.",
+                    null
+                );
+            }
+
             $job?->logInfo("Fetching content from {$document->source_url}");
 
             // Fetch the page
@@ -80,6 +101,12 @@ class DocumentScraperService
                 );
             }
 
+            // IMPORTANT: Extract footer policy links BEFORE main extraction removes footer
+            $footerPolicyLinks = $this->extractor->extractFooterPolicyLinks($html, $document->source_url);
+            if (!empty($footerPolicyLinks)) {
+                $job?->logInfo("Found " . count($footerPolicyLinks) . " policy links in footer");
+            }
+
             // Extract main content
             $job?->logInfo('Extracting main content...');
             $extractedHtml = $this->extractor->extract($html);
@@ -90,6 +117,54 @@ class DocumentScraperService
             // Convert to plain text
             $text = $this->extractor->toPlainText($extractedHtml);
             $job?->logInfo("Extracted " . strlen($text) . " characters of text");
+
+            // Get document type slug for validation
+            $documentTypeSlug = $document->documentType?->slug;
+
+            // Check if this looks like a homepage instead of a policy page
+            $homepageCheck = $this->extractor->detectHomepage($html, $document->source_url);
+            if ($homepageCheck['is_homepage']) {
+                $job?->logWarning("Page appears to be homepage, not a policy document");
+                foreach ($homepageCheck['indicators'] as $indicator) {
+                    $job?->logInfo("  - {$indicator}");
+                }
+
+                // Try to find and scrape the real policy link from footer
+                $retryResult = $this->retryWithFooterLink($footerPolicyLinks, $documentTypeSlug, $document, $job);
+                if ($retryResult) {
+                    return $retryResult;
+                }
+
+                // Report footer links found but couldn't auto-retry
+                $errorMsg = "Detected homepage instead of policy document. ";
+                if (!empty($footerPolicyLinks)) {
+                    $errorMsg .= "Found " . count($footerPolicyLinks) . " policy link(s) in footer: ";
+                    $errorMsg .= implode(', ', array_column($footerPolicyLinks, 'url'));
+                } else {
+                    $errorMsg .= "No policy links found in footer.";
+                }
+                return ScrapeResult::failure($errorMsg, $response->status());
+            }
+
+            // Validate content matches expected document type
+            if ($documentTypeSlug) {
+                $contentValidation = $this->extractor->validateContentType($text, $documentTypeSlug);
+                $job?->logInfo("Content validation: {$contentValidation['keyword_matches']} keyword matches, " .
+                    "{$contentValidation['word_count']} words (min: {$contentValidation['min_words']})");
+
+                if (!$contentValidation['valid']) {
+                    $job?->logWarning("Content validation failed: {$contentValidation['details']}");
+
+                    // Try to find and scrape the real policy link from footer
+                    $retryResult = $this->retryWithFooterLink($footerPolicyLinks, $documentTypeSlug, $document, $job);
+                    if ($retryResult) {
+                        return $retryResult;
+                    }
+
+                    // Continue anyway but log warning - might still be valid content
+                    $job?->logInfo("Continuing with low-confidence content (no valid footer link found)");
+                }
+            }
 
             // Check for a "full document" link (e.g., "Read the full terms...")
             // This catches landing pages that may have lots of text but link to a complete version
@@ -116,16 +191,19 @@ class DocumentScraperService
                 if (config('scraper.browser.enabled', true)) {
                     $browserResult = $this->scrapeWithBrowser($document, $job);
                     if ($browserResult->success) {
-                        return $browserResult;
+                        // Re-validate browser result for homepage/content type
+                        return $this->validateAndReturnResult($browserResult, $document, $footerPolicyLinks, $job);
                     }
                     // Browser also failed, return original error
                     $job?->logError("Browser rendering also failed: {$browserResult->error}");
                 }
 
-                return ScrapeResult::failure(
-                    "Extracted content too short ({$minLength} chars minimum)",
-                    $response->status()
-                );
+                // Include footer links in error message
+                $errorMsg = "Extracted content too short ({$minLength} chars minimum)";
+                if (!empty($footerPolicyLinks)) {
+                    $errorMsg .= ". Found policy links in footer: " . implode(', ', array_column($footerPolicyLinks, 'url'));
+                }
+                return ScrapeResult::failure($errorMsg, $response->status());
             }
 
             // Convert to markdown
@@ -165,6 +243,81 @@ class DocumentScraperService
     }
 
     /**
+     * Attempt to scrape a policy page from footer links when homepage/invalid content detected.
+     */
+    protected function retryWithFooterLink(array $footerLinks, ?string $documentTypeSlug, Document $document, ?ScrapeJob $job): ?ScrapeResult
+    {
+        if (empty($footerLinks) || !$documentTypeSlug) {
+            return null;
+        }
+
+        // Map document type slugs to link text patterns
+        $typeToPatterns = [
+            'privacy-policy' => ['privacy'],
+            'terms-of-service' => ['terms', 'conditions', 'tos'],
+            'cookie-policy' => ['cookie'],
+            'acceptable-use-policy' => ['acceptable', 'aup'],
+            'ccpa-notice' => ['ccpa', 'california', 'do not sell'],
+        ];
+
+        $patterns = $typeToPatterns[$documentTypeSlug] ?? [];
+        if (empty($patterns)) {
+            return null;
+        }
+
+        // Find matching footer link
+        foreach ($footerLinks as $link) {
+            $linkText = strtolower($link['text']);
+            foreach ($patterns as $pattern) {
+                if (str_contains($linkText, $pattern)) {
+                    $job?->logInfo("Found matching footer link for {$documentTypeSlug}: {$link['url']}");
+
+                    // Create a temporary document reference for the footer URL
+                    $result = $this->fetchFullDocument($link['url'], $document, $job);
+                    if ($result && $result->success) {
+                        // Validate the retry result
+                        $retryText = $result->contentText;
+                        $validation = $this->extractor->validateContentType($retryText, $documentTypeSlug);
+
+                        if ($validation['valid']) {
+                            $job?->logSuccess("Footer link scrape successful and validated");
+                            return $result;
+                        } else {
+                            $job?->logWarning("Footer link content also failed validation");
+                        }
+                    }
+                }
+            }
+        }
+
+        $job?->logInfo("No valid policy found in footer links");
+        return null;
+    }
+
+    /**
+     * Validate browser result and return, with retry if needed.
+     */
+    protected function validateAndReturnResult(ScrapeResult $result, Document $document, array $footerLinks, ?ScrapeJob $job): ScrapeResult
+    {
+        $documentTypeSlug = $document->documentType?->slug;
+
+        if ($documentTypeSlug && $result->success) {
+            $validation = $this->extractor->validateContentType($result->contentText, $documentTypeSlug);
+            if (!$validation['valid']) {
+                $job?->logWarning("Browser result failed content validation");
+
+                // Try footer links as last resort
+                $retryResult = $this->retryWithFooterLink($footerLinks, $documentTypeSlug, $document, $job);
+                if ($retryResult) {
+                    return $retryResult;
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    /**
      * Scrape a document and record the job.
      */
     public function scrapeWithJob(Document $document, ScrapeJob $job): ScrapeResult
@@ -200,7 +353,7 @@ class DocumentScraperService
         $result = $this->browserRenderer->render($document->source_url, [
             'browser' => $browser,
             'timeout' => config('scraper.browser.timeout', 30000),
-            'waitUntil' => config('scraper.browser.wait_until', 'networkidle'),
+            'waitUntil' => config('scraper.browser.wait_until', 'networkidle2'),
         ]);
 
         if (!$result->success) {
@@ -438,5 +591,25 @@ class DocumentScraperService
         }
 
         return $host;
+    }
+
+    /**
+     * Detect if a URL points to an unsupported file type (PDF, images, etc.)
+     * Returns the file type (e.g., "PDF") if unsupported, null if OK.
+     */
+    protected function detectUnsupportedFileType(string $url): ?string
+    {
+        // Parse URL and get the path
+        $parsed = parse_url($url);
+        $path = strtolower($parsed['path'] ?? '');
+
+        // Check for unsupported file extensions
+        foreach ($this->unsupportedExtensions as $ext) {
+            if (str_ends_with($path, $ext)) {
+                return strtoupper(ltrim($ext, '.'));
+            }
+        }
+
+        return null;
     }
 }

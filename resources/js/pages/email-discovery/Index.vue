@@ -17,7 +17,9 @@ import {
     Loader2,
     Unlink,
     Search,
-    Import
+    Import,
+    Eye,
+    Info
 } from 'lucide-vue-next';
 
 interface Connection {
@@ -46,13 +48,20 @@ interface DiscoveredCompany {
     company_id: number | null;
 }
 
+interface ProgressLogEntry {
+    timestamp: string;
+    message: string;
+    type: string;
+    data: Record<string, unknown>;
+}
+
 interface Job {
     id: number;
     status: string;
     emails_scanned: number;
     companies_found: number;
     error_message: string | null;
-    progress_log: string[] | null;
+    progress_log: ProgressLogEntry[] | null;
     duration_ms: number | null;
     created_at: string;
     completed_at: string | null;
@@ -70,6 +79,7 @@ const selectedCompanies = ref<number[]>([]);
 const isPolling = ref(false);
 const pollInterval = ref<number | null>(null);
 const currentJob = ref<Job | null>(props.latestJob);
+const expandedGroups = ref<string[]>([]);
 
 const isJobRunning = computed(() => {
     return currentJob.value?.status === 'pending' || currentJob.value?.status === 'running';
@@ -91,6 +101,84 @@ const allSelected = computed(() => {
     return pendingCompanies.value.length > 0 &&
            selectedCompanies.value.length === pendingCompanies.value.length;
 });
+
+// Extract root domain from a full domain (e.g., email.walmart.com -> walmart.com)
+function getRootDomain(domain: string): string {
+    const parts = domain.toLowerCase().split('.');
+    if (parts.length <= 2) return domain.toLowerCase();
+    // Handle common TLDs like .co.uk, .com.au, etc.
+    const commonSecondLevelTlds = ['co', 'com', 'net', 'org', 'gov', 'edu', 'ac'];
+    if (parts.length >= 3 && commonSecondLevelTlds.includes(parts[parts.length - 2])) {
+        return parts.slice(-3).join('.');
+    }
+    return parts.slice(-2).join('.');
+}
+
+interface DomainGroup {
+    rootDomain: string;
+    companies: DiscoveredCompany[];
+    totalConfidence: number;
+}
+
+// Group pending companies by root domain
+const groupedPendingCompanies = computed((): DomainGroup[] => {
+    const groups = new Map<string, DiscoveredCompany[]>();
+
+    for (const company of pendingCompanies.value) {
+        const rootDomain = getRootDomain(company.domain);
+        if (!groups.has(rootDomain)) {
+            groups.set(rootDomain, []);
+        }
+        groups.get(rootDomain)!.push(company);
+    }
+
+    // Convert to array and sort by highest confidence in group
+    return Array.from(groups.entries())
+        .map(([rootDomain, companies]) => ({
+            rootDomain,
+            companies: companies.sort((a, b) => b.confidence_score - a.confidence_score),
+            totalConfidence: Math.max(...companies.map(c => c.confidence_score))
+        }))
+        .sort((a, b) => b.totalConfidence - a.totalConfidence);
+});
+
+function toggleGroup(rootDomain: string) {
+    if (expandedGroups.value.includes(rootDomain)) {
+        expandedGroups.value = expandedGroups.value.filter(d => d !== rootDomain);
+    } else {
+        expandedGroups.value = [...expandedGroups.value, rootDomain];
+    }
+}
+
+function isGroupExpanded(rootDomain: string): boolean {
+    return expandedGroups.value.includes(rootDomain);
+}
+
+function toggleGroupSelection(group: DomainGroup) {
+    const groupIds = group.companies.map(c => c.id);
+    const allGroupSelected = groupIds.every(id => selectedCompanies.value.includes(id));
+
+    if (allGroupSelected) {
+        selectedCompanies.value = selectedCompanies.value.filter(id => !groupIds.includes(id));
+    } else {
+        const newSelection = [...selectedCompanies.value];
+        for (const id of groupIds) {
+            if (!newSelection.includes(id)) {
+                newSelection.push(id);
+            }
+        }
+        selectedCompanies.value = newSelection;
+    }
+}
+
+function isGroupFullySelected(group: DomainGroup): boolean {
+    return group.companies.every(c => selectedCompanies.value.includes(c.id));
+}
+
+function isGroupPartiallySelected(group: DomainGroup): boolean {
+    const selected = group.companies.filter(c => selectedCompanies.value.includes(c.id));
+    return selected.length > 0 && selected.length < group.companies.length;
+}
 
 function toggleSelectAll() {
     if (allSelected.value) {
@@ -334,7 +422,7 @@ onUnmounted(() => {
                         </div>
                         <div v-if="currentJob.progress_log && currentJob.progress_log.length > 0" class="rounded-lg bg-muted p-4">
                             <p class="text-sm font-mono">
-                                {{ currentJob.progress_log[currentJob.progress_log.length - 1] }}
+                                {{ currentJob.progress_log[currentJob.progress_log.length - 1].message }}
                             </p>
                         </div>
                     </div>
@@ -390,48 +478,92 @@ onUnmounted(() => {
                     </div>
                 </CardHeader>
                 <CardContent>
-                    <div class="space-y-4">
-                        <!-- Pending Companies -->
+                    <!-- Import explanation -->
+                    <div v-if="pendingCompanies.length > 0" class="mb-4 flex items-start gap-2 rounded-lg bg-blue-50 dark:bg-blue-950/30 p-3 text-sm text-blue-800 dark:text-blue-200">
+                        <Info class="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        <div>
+                            <strong>What happens when you import?</strong>
+                            <p class="mt-1 text-blue-700 dark:text-blue-300">
+                                Importing creates a company profile and automatically discovers their privacy policy, terms of service, and other legal documents. You'll be able to track changes and get notified when policies are updated.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="space-y-3">
+                        <!-- Grouped Pending Companies -->
                         <div
-                            v-for="company in pendingCompanies"
-                            :key="company.id"
-                            class="flex items-center gap-4 rounded-lg border p-4 cursor-pointer hover:bg-muted/50 transition-colors"
-                            @click="toggleCompany(company.id)"
+                            v-for="group in groupedPendingCompanies"
+                            :key="group.rootDomain"
+                            class="rounded-lg border overflow-hidden"
                         >
-                            <input
-                                type="checkbox"
-                                :checked="isCompanySelected(company.id)"
-                                @click.stop
-                                @change="toggleCompany(company.id)"
-                                class="h-4 w-4 cursor-pointer rounded border-gray-300 text-primary focus:ring-primary"
-                            />
-                            <div class="flex-1 min-w-0">
-                                <div class="flex items-center gap-2">
-                                    <Building2 class="h-4 w-4 text-muted-foreground" />
-                                    <span class="font-medium">{{ company.name }}</span>
-                                    <Badge :variant="getConfidenceBadgeVariant(company.confidence_level)">
-                                        {{ Math.round(company.confidence_score * 100) }}% confidence
-                                    </Badge>
-                                    <Badge variant="outline">{{ company.detection_source_label }}</Badge>
+                            <!-- Group Header -->
+                            <div
+                                class="flex items-center gap-3 p-3 bg-muted/30"
+                            >
+                                <div class="flex-1 min-w-0">
+                                    <div class="flex items-center gap-2">
+                                        <Building2 class="h-4 w-4 text-muted-foreground" />
+                                        <span class="font-medium">{{ group.rootDomain }}</span>
+                                        <Badge variant="secondary" class="text-xs">
+                                            {{ group.companies.length }} {{ group.companies.length === 1 ? 'email' : 'emails' }}
+                                        </Badge>
+                                        <Badge :variant="getConfidenceBadgeVariant(group.companies[0].confidence_level)">
+                                            {{ Math.round(group.totalConfidence * 100) }}%
+                                        </Badge>
+                                    </div>
                                 </div>
-                                <p class="text-sm text-muted-foreground">{{ company.domain }}</p>
-                                <p v-if="company.email_metadata?.subject" class="text-sm text-muted-foreground truncate">
-                                    {{ company.email_metadata.subject }}
-                                </p>
+                                <div class="flex items-center gap-2" @click.stop>
+                                    <Button size="sm" variant="outline" as-child>
+                                        <a :href="`https://${group.rootDomain}`" target="_blank">
+                                            <ExternalLink class="h-4 w-4" />
+                                        </a>
+                                    </Button>
+                                </div>
                             </div>
-                            <div class="flex items-center gap-2" @click.stop>
-                                <Button size="sm" variant="outline" as-child>
-                                    <a :href="`https://${company.domain}`" target="_blank">
-                                        <ExternalLink class="h-4 w-4" />
-                                    </a>
-                                </Button>
-                                <Button size="sm" @click="importSingle(company.id)">
-                                    <Check class="mr-1 h-4 w-4" />
-                                    Import
-                                </Button>
-                                <Button size="sm" variant="ghost" @click="dismissCompany(company.id)">
-                                    <X class="h-4 w-4" />
-                                </Button>
+
+                            <!-- Group Items -->
+                            <div class="divide-y">
+                                <div
+                                    v-for="company in group.companies"
+                                    :key="company.id"
+                                    class="flex items-center gap-4 p-3 pl-10 cursor-pointer hover:bg-muted/30 transition-colors"
+                                    @click="toggleCompany(company.id)"
+                                >
+                                    <input
+                                        type="checkbox"
+                                        :checked="isCompanySelected(company.id)"
+                                        @click.stop
+                                        @change="toggleCompany(company.id)"
+                                        class="h-4 w-4 cursor-pointer rounded border-gray-300 text-primary focus:ring-primary"
+                                    />
+                                    <div class="flex-1 min-w-0">
+                                        <div class="flex items-center gap-2 flex-wrap">
+                                            <span class="font-medium">{{ company.name }}</span>
+                                            <Badge :variant="getConfidenceBadgeVariant(company.confidence_level)" class="text-xs">
+                                                {{ Math.round(company.confidence_score * 100) }}%
+                                            </Badge>
+                                            <Badge variant="outline" class="text-xs">{{ company.detection_source_label }}</Badge>
+                                        </div>
+                                        <p class="text-xs text-muted-foreground">{{ company.email_address }}</p>
+                                        <p v-if="company.email_metadata?.subject" class="text-xs text-muted-foreground truncate mt-1">
+                                            {{ company.email_metadata.subject }}
+                                        </p>
+                                    </div>
+                                    <div class="flex items-center gap-1" @click.stop>
+                                        <Button size="sm" variant="ghost" as-child title="Preview email">
+                                            <Link :href="`/email-discovery/${company.id}`">
+                                                <Eye class="h-4 w-4" />
+                                            </Link>
+                                        </Button>
+                                        <Button size="sm" @click="importSingle(company.id)">
+                                            <Check class="mr-1 h-4 w-4" />
+                                            Import
+                                        </Button>
+                                        <Button size="sm" variant="ghost" @click="dismissCompany(company.id)">
+                                            <X class="h-4 w-4" />
+                                        </Button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
